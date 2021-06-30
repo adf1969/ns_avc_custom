@@ -1,0 +1,14 @@
+{
+  "accounts": [
+    {
+      "name": "Production",
+      "companyId": "6198441",
+      "cabinetPath": "/SuiteScripts"
+    },
+    {
+      "name": "Sandbox",
+      "companyId": "6198441_SB1",
+      "cabinetPath": "/SuiteScripts"
+    }
+  ]
+}
