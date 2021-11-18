@@ -7,6 +7,8 @@
  *
  */
 
+/** NOT USED - Using avc_vbill_custom_cs.ts instead */
+
 import {EntryPoints} from "N/types";
 // @ts-ignore
 import log = require('N/log');
@@ -45,6 +47,7 @@ export let postSourcing: EntryPoints.Client.postSourcing = (context: EntryPoints
 
 // Given a Subsidiary, retrieve that Subsidiary's Default Location Id
 function getDefaultLocId(subId) {
+  if (!subId) return false;
   let defaultLoc = search.lookupFields({
     type: search.Type.SUBSIDIARY,
     id: subId,
