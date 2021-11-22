@@ -111,9 +111,16 @@ function getFirstAttachedFileIdFields(recordType : string, recordId) : [false | 
   let searchResults = dsSearch.run().getRange({start: 0, end: 100});
   log.debug(stLogTitle, 'searchResults = ' + JSON.stringify(searchResults));
   if (searchResults.length >= 1) {
-    let attCount = searchResults.length;
-    let objFileFields = searchResults[0];
-    log.debug(stLogTitle, 'ObjAvcDsFields = ' + JSON.stringify(objFileFields));
+    let fileId = searchResults[0].getValue({name: 'internalid', join: 'file'});
+    let attCount:number, objFileFields;
+    if (fileId) {
+      attCount = searchResults.length;
+      objFileFields = searchResults[0];
+      log.debug(stLogTitle, 'ObjAvcDsFields = ' + JSON.stringify(objFileFields));
+    } else {
+      attCount = 0;
+      objFileFields = false;
+    }
     return [objFileFields, attCount];
   }
   return [false, 0];
