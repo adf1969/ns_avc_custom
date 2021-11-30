@@ -28,6 +28,7 @@ import serverWidget = require('N/ui/serverWidget');
 // context.newRecord.getValue('acctname') - gets the Account Name (the user prinable name. eg: Albany-FNBA)
 //
 let AVC_DS_CUSTOM_RECORD_ID = 'customrecord_avc_ds_data';
+let AVC_DS_CUSTREC_DSRECID_FLD = 'custrecord_avc_ds_dsrecid';
 export function beforeLoad(context: EntryPoints.UserEvent.beforeLoadContext) {
   debugger;
   // Only run in Edit/View Modes
@@ -77,6 +78,46 @@ export function beforeLoad(context: EntryPoints.UserEvent.beforeLoadContext) {
     }
   }
 }
+
+// I decided to do this in the beforeLoad() since it sets the field Prior to editing, which is best.
+// Turns out, you can't attach a Client Script to the Account record type, contrary to the Docs
+// See: https://netsuiteprofessionals.com/question/deploy-client-script-to-account-record-type/
+
+export function beforeSubmit(context: EntryPoints.UserEvent.beforeSubmitContext) {
+  debugger;
+  let stLogTitle = 'beforeSubmit';
+  log.debug(stLogTitle, context.type);
+  if ([context.UserEventType.EDIT].includes(context.type)) {
+
+    log.debug(stLogTitle + ':oldRecord', JSON.stringify(context.oldRecord));
+    log.debug(stLogTitle + ':newRecord', JSON.stringify(context.newRecord));
+
+    let newRecord = context.newRecord
+
+    // Is this a Bank Account?
+    let acctType = newRecord.getValue('accttype');
+    if (acctType == 'Bank') {
+      // >> Bank Account
+      // Get the AcctID
+      let acctId = newRecord.getValue('id');
+      // Check and see if there is an Associated DS Record for this Acct ID
+      let acctDsRecordId = newRecord.getValue(AVC_DS_CUSTREC_DSRECID_FLD);
+      if (!acctDsRecordId) {
+        // Field is Empty, set it if we can
+        log.debug(stLogTitle, 'Field ' + AVC_DS_CUSTREC_DSRECID_FLD + ' is Blank');
+        let dsRecordId = getDSRecordId(acctId);
+        if (dsRecordId) {
+          // We have a DS Record, Set custrecord_avc_ds_dsrecid
+          newRecord.setValue( {fieldId: AVC_DS_CUSTREC_DSRECID_FLD, value: dsRecordId});
+        }
+      } else {
+        // Field has a value, leave it
+        log.debug(stLogTitle, 'Field ' + AVC_DS_CUSTREC_DSRECID_FLD + ' has value ' + acctDsRecordId);
+      }
+    }
+  }
+}
+
 
 // @ts-ignore
 function getDSRecordId(accountId) {
