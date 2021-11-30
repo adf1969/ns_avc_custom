@@ -70,12 +70,12 @@ export let postSourcing: EntryPoints.Client.postSourcing = (context: EntryPoints
   }
 }
 
-// Given a Customer, retrieve that Customer's Default Deposit Account Id
+// Given a Customer or Vendor, retrieve that Customer's Default Deposit Account Id
 // @ts-ignore
 function getDefaultDepositAcctId(entityId) {
   if (!entityId) return false;
   let defaultAcct = search.lookupFields({
-    type: search.Type.CUSTOMER,
+    type: search.Type.ENTITY,
     id: entityId,
     columns: ['custentity_avc_default_dep_acct']
   });
