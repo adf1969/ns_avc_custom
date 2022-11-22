@@ -18,25 +18,36 @@ import query = require('N/query');
 import {Query} from "N/query";
 
 export const onRequest: EntryPoints.Suitelet.onRequest = (ctx) => {
-	log.debug('avc_sl_vendor_loc_list:onRequest', `context: ${ctx}`);
-	let form = serverWidget.createForm({
-		title: 'Vendor Location List'
-	})
+	log.debug('avc_sl_vendor_loc_list:onRequest', 'context: ' + JSON.stringify(ctx));
+	let request = ctx.request;
+	let response = ctx.response;
+	if (request.method == 'GET') {
+		let form = serverWidget.createForm({
+			title: 'Vendor Location List'
+		})
 
-	// @ts-ignore
-	let vendorList = getVendorList();
-	let vendorList_json = form.addField({
-		id: 'custpage_avc_loc_vendorlist_json',
-		type: serverWidget.FieldType.LONGTEXT,
-		label: 'Vendor List JSON'
-	});
-	// @ts-ignore
-	vendorList_json.defaultValue = JSON.stringify(vendorList.resultSet);
+		// @ts-ignore
+		let vendorList = getVendorList();
+		let vendorList_json = form.addField({
+			id: 'custpage_avc_loc_vendorlist_json',
+			type: serverWidget.FieldType.LONGTEXT,
+			label: 'Vendor List JSON'
+		});
+		// @ts-ignore
+		vendorList_json.defaultValue = JSON.stringify(vendorList);
 
-	form.addSubmitButton({
-		label: 'Refresh'
-	});
-	ctx.response.writePage(form);
+		// Build List from Vendors
+		// @ts-ignore
+		let vSubList = createVendorSublist(form, "vsublist", vendorList);
+
+		form.addSubmitButton({
+			label: 'Refresh'
+		});
+		response.writePage(form);
+
+	} else { // POST
+
+	}
 };
 
 // INTERFACES
@@ -48,6 +59,67 @@ interface ObjSql {
 }
 
 // FUNCTIONS
+
+// UI FUNCTIONS
+
+// @ts-ignore
+function createVendorSublist(form : serverWidget.Form, sublistName : string, vlist : ObjSql) : serverWidget.Sublist {
+	try {
+		log.debug('createVendorSublist:sublistName', sublistName);
+		let sublistTitle = "Vendor Location List";
+		let sublist = form.addSublist({
+			id: 'custpage_' + sublistName,
+			type: serverWidget.SublistType.LIST,
+			label: sublistTitle
+		});
+		let rs = vlist.resultSet;
+
+		// Create the sublist from the Columns
+		log.debug('createVendorSublist:Build Sublist', `Columns: ${rs.columns.length}`);
+		rs.columns.forEach( (col, cIndex) => {
+			log.audit('createVendorSublist:sublist.addField:col', JSON.stringify(col));
+			sublist.addField({
+				id: 'custpage_' + sublistName + '_' + col.alias,
+				label: col.label,
+				type: serverWidget.FieldType.TEXT
+			});
+		});
+
+		log.debug('createVendorSublist:Loop thru Results and Fill Sublist', `Results: ${rs.results.length}`);
+		rs.results.forEach( (result, rIndex) => { // Loop thru Rows
+			log.debug('createVendorSublist:sublist.setSublistValue for all Values in Result', JSON.stringify(result));
+			result.values.forEach( (value, vIndex) => { // Loop thru Cols/Values in Row
+				let col = rs.columns[vIndex];
+				let id = 'custpage_' + sublistName + '_' + col.alias;
+				//let val = result.values[vIndex]?.toString() ?? ' ';
+				//val = val.length == 0 ? ' ' : val;
+				let val = value?.toString() ?? ' '; // this MUST be set to at LEAST 1 space, otherwise, it throws an ERROR!
+				//let val = ( value === null ) ? '' : value?.toString() ?? '';
+				//let val = ( value || '').toString();
+				//if (val == null || val === null || typeof val === 'undefined') { val = 'UND' }
+				//let val = '';
+				// if ( value == null || value === null || typeof value === 'undefined') {
+				// 	val = ''
+				// } else {
+				// 	val = value.toString();
+				// }
+				log.audit(`createVendorSublist:setSublistValue (id:${id} | v:${vIndex} | r:${rIndex})`, val);
+				sublist.setSublistValue({
+					id: id,
+					line: rIndex,
+					value: val
+				})
+			});
+
+		});
+		return sublist;
+	} catch (e) {
+		log.error('Error creating Vendor sublist - ' + e.name, e.message);
+		log.error('Error creating Vendor sublist - ' + e.name + ' stacktrace:', e.stack);
+	}
+}
+
+// DATABASE FUNCTIONS
 function getVendorList(): ObjSql {
 
 	// @ts-ignore
@@ -67,17 +139,11 @@ function getVendorList(): ObjSql {
 			}
 		})
 	});
-
-  // for (let result of rs) {
-  //   let values = result.values
-  //   for (let value of values) {
-	// 	  if ((value || '').toString().startsWith('[') && (value || '').toString().endsWith(']')) {
-  //       // Token String - fill with function result
-  //       log.debug('getVendorList:value', value);
-  //       value = "FILLED";
-  //     }
-	// 	}
-	// }
+	// Now that we have updated the ResultSet, we need to update the Mapped object ** NOTE: This does NOT work ** - it leaves
+	//  the records with the OLD versions. Not sure if the asMapped() is cached or what.
+	let records = qryVendorsList.resultSet.asMappedResults();
+	log.debug('getVendorList:rSet.records', JSON.stringify(records));
+	qryVendorsList.records = records;
 
   log.debug('getVendorList:rSet.results', JSON.stringify(rSet.results));
 
