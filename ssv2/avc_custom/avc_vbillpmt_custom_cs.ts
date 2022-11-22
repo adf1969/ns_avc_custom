@@ -5,6 +5,7 @@
  * @NScriptType ClientScript
  * @NApiVersion 2.1
  *
+ * File Version: 1.0-2021-12-21-17:42:29
  * Purpose: Purpose: AVC Customizations to Vendor Bill Payment Form - Client Script
  */
 
@@ -19,48 +20,75 @@ import search = require("N/search");
 * *
  */
 export let pageInit: EntryPoints.Client.pageInit = (context : EntryPoints.Client.pageInitContext) => {
-  log.debug('pageInit', JSON.stringify(context));
+  let stLogTitle = 'pageInit';
+  log.debug(stLogTitle + ':context', JSON.stringify(context));
+
   debugger;
   let url = new URL(document.location.href);
   let billId = url.searchParams.get('bill');
-  log.debug('billId', billId);
+  log.debug(stLogTitle + ':billId', billId);
 
-  // Set ToBePrinted = True
   let cRecord = context.currentRecord;
-  cRecord.setValue({
-    fieldId: 'tobeprinted',
-    value: true
-  });
+  log.debug(stLogTitle + ':cRecord', JSON.stringify(cRecord));
 
-  // Get Bill Fields
-  if (billId) {
-    // @ts-ignore
-    let billResult = getAvcBillResult(billId);
-    if (billResult) {
-      let billLocationId = billResult.getValue('location');
-      cRecord.setValue({fieldId: 'location', value: billLocationId});
-    }
-  }
-  // If Subsidiary Set, and Location is Blank, set the Location to the Default, if one is set
-  let subId = cRecord.getValue({fieldId: 'subsidiary'});
-  let locId = cRecord.getValue({fieldId: 'location'});
-  if (subId && !locId) {
-    let defaultLocId = getDefaultLocId(subId);
-    if (defaultLocId) {
-      log.debug('pageInit', `Set Location to: ${defaultLocId}`)
-      cRecord.setValue({fieldId: 'location', value: defaultLocId});
-    }
+  if (['create'].includes(context.mode)) {
+    // Set ToBePrinted = True
+    cRecord.setValue({
+      fieldId: 'tobeprinted',
+      value: true
+    });
   }
 
-  // If we have a Location, get the Default Bank Acct for that Location and Set the Default Bank Acct to it
-  locId = cRecord.getValue({fieldId: 'location'});
-  if (locId) {
-    let defBankAcct = getLocDefaultAPBankAcct(locId);
-    if (defBankAcct) {
-      // set the Account to the Location Default
-      cRecord.setValue({fieldId: 'account', value: defBankAcct});
+  if (['create', 'edit'].includes(context.mode)) {
+    // Get Bill Fields
+    if (billId) {
+      // @ts-ignore
+      let billResult = getAvcBillResult(billId);
+      log.debug(stLogTitle +":billResult", JSON.stringify(billResult));
+      if (billResult) {
+        let locId = cRecord.getValue({fieldId: 'location'});
+        let billLocationId = billResult.getValue('location');
+        if (!locId) {
+          log.debug(stLogTitle, `Found Bill. Set Location to: ${billLocationId}`);
+          cRecord.setValue({fieldId: 'location', value: billLocationId});
+        }
+      }
+    }
+    // If Subsidiary Set, and Location is Still Blank, set the Location to the Default, if one is set
+    let subId = cRecord.getValue({fieldId: 'subsidiary'});
+    let locId = cRecord.getValue({fieldId: 'location'});
+    if (subId && !locId) {
+      let defaultLocId = getDefaultLocId(subId);
+      if (defaultLocId) {
+        log.debug('pageInit', `Set Location to: ${defaultLocId}`)
+        cRecord.setValue({fieldId: 'location', value: defaultLocId});
+      }
+    }
+
+    // If we have a Location, get the Default Bank Acct for that Location and Set the Default Bank Acct,
+    // Check if Create or Edit to detemrine whether to set.
+    locId = cRecord.getValue({fieldId: 'location'});
+    if (locId) {
+      let defBankAcct = getLocDefaultAPBankAcct(locId);
+      if (defBankAcct) {
+        // set the Account to the Location Default?
+        // On Create, set it to the Default for this Location, not matter what.
+        if (context.mode == 'create') {
+          cRecord.setValue({fieldId: 'account', value: defBankAcct});
+        }
+
+        // Only set on Edit, if Account is Blank
+        if (context.mode == 'edit') {
+          let accountId = cRecord.getValue('account');
+          if (!accountId) {
+            cRecord.setValue({fieldId: 'account', value: defBankAcct});
+          }
+        }
+      }
     }
   }
+
+
 
 }
 
@@ -151,12 +179,15 @@ function getAvcLocationResult(locId) {
 // @ts-ignore
 function getLocDefaultAPBankAcct(locId) {
   if (!locId) return false;
+  log.debug('getLocDefaultAPBankAcct:locId', locId);
   // @ts-ignore
   let stLogTitle = 'getLocDefaultAPBankAcct';
   let locResult = getAvcLocationResult(locId);
   if (locResult) {
     let bankAcct = locResult.getValue('custrecord_avc_default_ap_bankacct');
+    log.debug('getLocDefaultAPBankAcct:custrecord_avc_default_ap_bankacct', bankAcct);
     return bankAcct;
   }
   return false;
 }
+
