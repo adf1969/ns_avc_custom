@@ -1,9 +1,19 @@
+/**
+ * avc_sl_util.ts
+ *
+ * @NScriptName AVC | SuiteLet Util Functions
+ * @NApiVersion 2.1
+ *
+ * Purpose: Provide Util Functions for AVC SuiteLet routines
+ *
+ */
+
 // IMPORTS
 import log = require('N/log');
 // @ts-ignore
 import record = require('N/record');
 import query = require('N/query');
-import {Query} from "N/query";
+
 // @ts-ignore
 import {url, file, format, error, search} from 'N';
 import {Type} from "N/record";
@@ -19,8 +29,286 @@ export interface ObjSql {
 
 // DATABASE FUNCTIONS
 
+//export function createCondition(options: any): query.Condition;
+
+
 // @ts-ignore
-export function getVendorList(asLinks? : boolean = false): ObjSql {
+export function createAccountSearch(accountType: string, date: string): search.Search {
+	let stLogTitle = "createAccountSearch";
+	log.debug(`${stLogTitle}:(accountType, date)`, `${accountType}, ${date}`);
+
+	// Create a search to retrieve the accounts based on the filter criteria
+	const accountSearch = search.create({
+		type: search.Type.ACCOUNT,
+		filters: [
+			'isinactive', search.Operator.IS, 'F',
+		],
+		columns: [
+			'name',
+			'type',
+			'number',
+			//'currency',
+			'balance',
+		],
+	});
+
+	// This does NOT work.
+	// const joinedTransactionColumn = search.createColumn({
+	// 	name: 'formulabalance',
+	// 	label: 'Joined Transaction Balance',
+	// 	formula: 'SUM(CASE WHEN {account.internalid} = {transaction.account} AND {transaction.date} <= "' + date + '" THEN {transaction.amount} ELSE 0 END)'
+	// });
+	// accountSearch.columns.push(joinedTransactionColumn);
+
+
+	if (accountType) {
+		accountSearch.filters.push(
+			search.createFilter({
+				name: 'type',
+				operator: search.Operator.IS,
+				values: [accountType],
+			})
+		);
+	}
+
+	// if (date) {
+	// 	accountSearch.filters.push(
+	// 		search.createFilter({
+	// 			name: 'lastmodifieddate',
+	// 			operator: search.Operator.ONORBEFORE,
+	// 			values: [date]
+	// 		})
+	// 	);
+	// }
+
+	log.debug(`${stLogTitle}:accountSearch`, JSON.stringify(accountSearch));
+	return accountSearch;
+}
+
+// @ts-ignore
+export function getAccountTypes(): { value: string; text: string }[] {
+	// To figure out what options exist here, use the Data Browser and select the "Analytics Browser" tab
+	const accountTypesQuery = `
+    SELECT id, longname
+    FROM AccountType
+    ORDER BY longname
+  `;
+
+	const accountTypesResultSet = query.runSuiteQL({
+		query: accountTypesQuery,
+	});
+
+	const accountTypes: { value: string; text: string }[] = [];
+
+	accountTypesResultSet.results.forEach((result) => {
+		const idValue = result.values[0] as string;
+		const nameValue = result.values[1] as string;
+		accountTypes.push({
+			value: idValue,
+			text: nameValue,
+		});
+	});
+
+	return accountTypes;
+}
+
+
+export function getAccountBalRptList(asLinks : boolean = false, qryCondition? : query.Condition): ObjSql {
+	let stLogTitle = 'getAccountBalRptList';
+	log.debug(`${stLogTitle}:asLinks`, asLinks);
+
+	// @ts-ignore
+	let qryList = getResultByQueryId('custdataset_avc_ds_accountbalrpt', qryCondition);
+	log.debug(`${stLogTitle}:qryList`, JSON.stringify(qryList));
+
+	//let qryAccountBalRptList = processList(qryList, asLinks);
+	let qryAccountBalRptList = qryList;
+
+	return qryAccountBalRptList;
+} // getAccountBalRptList
+
+
+
+interface TranAcctBalQueryOptions {
+	accttype?: string | string[];
+	isinactive?: boolean;
+	trandateOnOrBefore?: string;
+}
+
+export function createAcctBalQuery(options?: TranAcctBalQueryOptions): query.Query {
+	const transactionQuery: query.Query = query.create({
+		type: query.Type.TRANSACTION,
+	});
+
+	/* Joins */
+	const transactionLinesJoin = transactionQuery.autoJoin({
+		fieldId: 'transactionlines',
+	});
+
+	const accountingImpactJoin = transactionLinesJoin.autoJoin({
+		fieldId: 'accountingimpact',
+	});
+
+	const accountJoin = accountingImpactJoin.autoJoin({
+		fieldId: 'account',
+	});
+
+	/* Conditions */
+	const conditions: query.Condition[] = [];
+
+	if (options?.accttype) {
+		const acctTypeValues = Array.isArray(options.accttype)
+			? options.accttype
+			: [options.accttype];
+		const acctTypeCondition = accountJoin.createCondition({
+			fieldId: 'accttype',
+			operator: query.Operator.ANY_OF,
+			values: acctTypeValues,
+		});
+		conditions.push(acctTypeCondition);
+	}
+
+	if (options?.isinactive) {
+		const inactiveCondition = accountJoin.createCondition({
+			fieldId: 'isinactive',
+			operator: query.Operator.IS,
+			values: [options.isinactive],
+		});
+		conditions.push(inactiveCondition);
+	}
+
+	if (options?.trandateOnOrBefore) {
+		const dateCondition = transactionQuery.createCondition({
+			fieldId: 'trandate',
+			operator: query.Operator.ON_OR_BEFORE,
+			values: [options.trandateOnOrBefore],
+		});
+		conditions.push(dateCondition);
+	}
+
+	// Uses the Spread Operator (...) to expand "conditions" to be an array of parameters.
+	if (conditions.length > 0) {
+		transactionQuery.condition = transactionQuery.and(...conditions);
+	}
+
+	/* Columns */
+	const transactionIdColumn = transactionQuery.createColumn({
+		fieldId: 'id',
+		groupBy: false,
+		alias: 'tranid',
+	});
+
+	const transactionDisplayNameColumn = transactionQuery.createColumn({
+		fieldId: 'trandisplayname',
+		groupBy: false,
+		alias: 'trandisplayname',
+	});
+
+	const subsidiaryColumn = transactionLinesJoin.createColumn({
+		fieldId: 'subsidiary',
+		groupBy: false,
+		context: {
+			name: 'DISPLAY',
+		},
+		alias: 'subsidiary',
+	});
+
+	const accountIdColumn = accountJoin.createColumn({
+		fieldId: 'id',
+		groupBy: false,
+		alias: 'accountid',
+	});
+
+	const inactiveColumn = accountJoin.createColumn({
+		fieldId: 'isinactive',
+		groupBy: false,
+		alias: 'isinactive',
+	});
+
+	const accountTypeColumn = accountJoin.createColumn({
+		fieldId: 'accttype',
+		groupBy: false,
+		alias: 'accttype',
+	});
+
+	const expenseAccountColumn = transactionLinesJoin.createColumn({
+		fieldId: 'expenseaccount',
+		groupBy: false,
+		context: {
+			name: 'DISPLAY',
+		},
+		alias: 'expenseaccount',
+	});
+
+	const transactionDateColumn = transactionQuery.createColumn({
+		fieldId: 'trandate',
+		groupBy: false,
+		alias: 'trandate',
+	});
+
+	const netAmountColumn = transactionLinesJoin.createColumn({
+		fieldId: 'netamount',
+		groupBy: false,
+		aggregate: query.Aggregate.SUM,
+		alias: 'netamount',
+	});
+
+	const endingBalanceColumn = transactionLinesJoin.createColumn({
+		fieldId: 'custcol_avc_ending_bal',
+		groupBy: false,
+		alias: 'custcol_avc_ending_bal',
+	});
+
+	transactionQuery.columns = [
+		transactionIdColumn,
+		transactionDisplayNameColumn,
+		subsidiaryColumn,
+		accountIdColumn,
+		inactiveColumn,
+		accountTypeColumn,
+		expenseAccountColumn,
+		transactionDateColumn,
+		netAmountColumn,
+		endingBalanceColumn
+	];
+
+	return transactionQuery;
+}
+
+export function getAcctBalQueryResultSet1(options?: TranAcctBalQueryOptions): query.ResultSet {
+	const transactionQuery = createAcctBalQuery(options);
+	const searchResult = transactionQuery.run();
+	return searchResult;
+}
+
+export function getAcctBalQueryResultSet(options?: TranAcctBalQueryOptions): ObjSql {
+	try {
+		const transactionQuery = createAcctBalQuery(options);
+		let beginTime = new Date().getTime();
+		const resultSet = transactionQuery.run();
+		let endTime = new Date().getTime();
+		let elapsedTime = endTime - beginTime;
+
+		let records = resultSet.asMappedResults();
+
+		let objSQL = {
+			recordCount: records.length,
+			time: elapsedTime,
+			records: records,
+			resultSet: resultSet
+		}
+		return objSQL;
+	} catch (e) {
+		log.error('Error getting AcctBalQueryResultSet - ' + e.name, e.message);
+		log.error('Error getting AcctBalQueryResultSet - ' + e.name + ' stacktrace:', e.stack);
+		return e + e.stack;
+	}
+}
+
+
+
+
+export function getVendorList(asLinks : boolean = false): ObjSql {
 	let stLogTitle = 'getVendorList';
 	log.debug(`${stLogTitle}:asLinks`, asLinks);
 
@@ -148,6 +436,8 @@ export function getResultFromQuery(qry: Query) : ObjSql {
 	try {
 		let stLogTitle = 'getResultFromQuery';
 		log.debug(`${stLogTitle}:qry`, JSON.stringify(qry));
+		log.audit(`${stLogTitle}:qry.columns`, JSON.stringify(qry.columns));
+		log.audit(`${stLogTitle}:qry.condition`, JSON.stringify(qry.condition));
 
 		let beginTime = new Date().getTime();
 		let resultSet = qry.run();
@@ -155,11 +445,11 @@ export function getResultFromQuery(qry: Query) : ObjSql {
 		let elapsedTime = endTime - beginTime;
 
 		//let results = resultSet.results;
-		log.audit('getResultFromQuery:resultSet.columns', JSON.stringify(resultSet.columns));
-		log.audit('getResultFromQuery:resultSet.types', JSON.stringify(resultSet.types));
-		log.debug('getResultFromQuery:resultSet.results', JSON.stringify(resultSet.results));
+		log.audit(`${stLogTitle}:resultSet.columns`, JSON.stringify(resultSet.columns));
+		log.audit(`${stLogTitle}:resultSet.types`, JSON.stringify(resultSet.types));
+		log.debug(`${stLogTitle}:resultSet.results`, JSON.stringify(resultSet.results));
 		let records = resultSet.asMappedResults();
-		log.debug('getResultFromQuery:records', JSON.stringify(records));
+		log.debug(`${stLogTitle}:records`, JSON.stringify(records));
 
 
 		let objSQL = {
@@ -170,27 +460,49 @@ export function getResultFromQuery(qry: Query) : ObjSql {
 		}
 		return objSQL;
 	} catch (e) {
+		log.error('Error getting result from Query - ' + e.name, e.message);
+		log.error('Error getting result from Query - ' + e.name + ' stacktrace:', e.stack);
 		return e + e.stack;
 	}
 }
 
-// @ts-ignore
-export function getResultByQueryId(qryId: string): ObjSql {
+export function getResultByQueryId(qryId: string, qryCondition?: query.Condition): ObjSql {
 	try {
 		let stLogTitle = 'getResultByQueryId';
 		log.debug(`${stLogTitle}:qryId`, qryId);
+		log.debug(`${stLogTitle}:qryCondition`, qryCondition);
 
 		let qry = query.load({
 			id: qryId
 		});
+		logLarge(`${stLogTitle}:qry`, qry);
+		logLarge(`${stLogTitle}:toSuiteQL`, qry.toSuiteQL());
+
+		// TODO: Need to add any Joins that are required by the Conditions
+		// TODO: This doesn't work. THe issue is that I need to add my Condition to a SPECIFIC Join. See WB/DS Query output
+		if (qryCondition) {
+			if (!qry.condition) {
+				qry.condition = createQryCondition(qry, qryCondition);
+				//qry.condition = qry.createCondition(qryCondition);
+			} else {
+				log.debug(`${stLogTitle}:qry.condition [BEFORE]`, JSON.stringify(qry.condition));
+					qry.and(
+						qry.condition,
+						createQryCondition(qry, qryCondition)
+						//qry.createCondition(qryCondition)
+					);
+			}
+		}
+		log.debug(`${stLogTitle}:qry.condition [AFTER]`, JSON.stringify(qry.condition));
 
 		return getResultFromQuery(qry);
 	} catch (e) {
+		log.error('Error getting result from Query by ID - ' + e.name, e.message);
+		log.error('Error getting result from Query by ID - ' + e.name + ' stacktrace:', e.stack);
 		return e + e.stack;
 	}
 }
 
-// @ts-ignore
 export function getResultFromQueryString(qrySql: string): ObjSql {
 	try {
 		let stLogTitle = 'getResultFromQueryString';
@@ -217,10 +529,75 @@ export function getResultFromQueryString(qrySql: string): ObjSql {
 		}
 		return objSQL;
 	} catch (e) {
+		log.error('Error getting result from Query by String - ' + e.name, e.message);
+		log.error('Error getting result from Query by String - ' + e.name + ' stacktrace:', e.stack);
 		return e + e.stack;
 	}
 }
 
+// CONDITION FUNCTIONS
+
+/**
+ * Works the same as query.createCondition, but also adds the various autoJoins if the options.fieldid uses
+ * dotted notation, as in:
+ * transactionlines.accountingimpact.account.accttype
+ * This will add the following autoJoins:
+ *  transactionlines
+ *  accoutingimpact
+ *  account
+ *  It will then add the Condition of accttype to the "account" Component
+ *
+ *  NOT USED: Amazingly, it appears I don't need this routine. It works, but I think just passing a dotted
+ *  fieldid to the options of createCondition() seems to do the joining for me.
+*/
+export function createQryCondition(qry : query.Query, options: CreateConditionOptions | CreateConditionWithFormulaOptions) : query.Condition {
+	let stLogTitle = 'createQryCondition';
+	log.debug(`${stLogTitle}:options`, options);
+
+	debugger;
+	const fieldIds = options.fieldId?.split('.');
+	const lastFieldId = fieldIds?.pop();
+
+	let component: query.Query | query.Component = qry;
+	if (fieldIds) {
+		for (const fieldId of fieldIds) {
+			try {
+				component = component.autoJoin({ fieldId });
+			} catch (e) {
+				log.error(`Error adding autoJoin (${fieldId}) - ` + e.name, e.message);
+				log.error(`Error adding autoJoin (${fieldId}) - ` + e.name + ' stacktrace:', e.stack);
+			}
+			log.debug(`${stLogTitle}:component`, component);
+			// if (!('id' in component)) {
+			// 	throw new Error('Component does not have an id property');
+			// }
+		}
+	}
+
+	if (!lastFieldId && !options.formula) {
+		throw new Error('No fieldId or formula provided in options');
+	}
+
+	if (options.formula) {
+		const condition = component.createCondition({
+			formula: options.formula,
+			type: options.type,
+			aggregate: options.aggregate,
+		});
+		return condition;
+	} else {
+		const condition = component.createCondition({
+			fieldId: lastFieldId!,
+			operator: options.operator,
+			values: options.values,
+			type: options.type,
+			aggregate: options.aggregate,
+		});
+		log.debug(`${stLogTitle}:condition`, condition);
+		return condition;
+	}
+
+}
 
 // TOKEN FUNCTIONS
 
@@ -785,7 +1162,6 @@ export function getFileIdFields(recordType : string, recordId) : [false | search
 
 // ----------------------
 // UTILITY
-// @ts-ignore
 export function formatToCurrency(amount : number) : string {
 	amount = (typeof amount !== 'undefined' && amount !== null) ? amount : 0;
 	return "$" + (amount).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
@@ -822,4 +1198,145 @@ export function csvEncode(val:string) : string {
 	let re = /<br>/gi;
 	val = val.replace(re, '\n');
 	return val;
+}
+
+function splitText(text: string, maxLength: number): string[] {
+	const result = [];
+	let i = 0;
+	while (i < text.length) {
+		result.push(text.slice(i, i+ maxLength));
+		i += maxLength;
+	}
+	return result;
+}
+
+function logLarge(title: string,  logObject: object, maxLogLength: number = 3900) {
+	const logString = JSON.stringify(logObject);
+	const logChunks = splitText(logString, maxLogLength);
+
+	let iChunk = 1;
+	for (const chunk of logChunks) {
+		log.debug(`${title} (${iChunk}/${logChunks.length}):`, chunk);
+		iChunk++;
+	}
+}
+
+
+
+// --------------------------------------------------------------
+// @hitc Non-Exported Interfaces - Added here so I can use them
+
+export interface CreateConditionOptions {
+	/** Field (column) id. Required if options.operator and options.values are used. */
+	fieldId?: string;
+
+	/** Use the Operator enum. */
+	operator: query.Operator;
+
+	/**
+	 * Array of values to use for the condition.
+	 * Required if options.fieldId and options.operator are used, and options.operator does not have a value of query.Operator.EMPTY or query.Operator.EMPTY_NOT.
+	 */
+	values: string | boolean | string[] | boolean[] | number[] | Date[] | RelativeDate[] | Period[]; // You wouldn't have multiple boolean values in an array, obviously. But you might specify it like: [true].
+
+	/**
+	 * If you use the options.formula parameter, use this parameter to explicitly define the formula’s return type. This value sets the Condition.type property.
+	 * Use the appropriate query.ReturnType enum value to pass in your argument. This enum holds all the supported values for this parameter.
+	 * Required if options.fieldId is not used.
+	 */
+	formula?: string;
+
+	/** Required if options.formula is used. */
+	type?: string;
+
+	/** Aggregate function. Use the Aggregate enum. */
+	aggregate?: string;
+}
+
+export interface CreateConditionWithFormulaOptions extends CreateConditionOptions {
+	/** Formula */
+	formula: string;
+}
+
+/** A period of time to use in query conditions. Use query.createPeriod(options) to create this object. */
+export interface Period {
+	/** The adjustment of the period. This property uses values from the query.PeriodAdjustment enum. */
+	readonly adjustment: string;
+	/** The code of the period. This property uses values from the query.PeriodCode enum. */
+	readonly code: string;
+	/**
+	 * The type of the period. This property uses values from the query.PeriodType enum.
+	 * If you create a period using query.createPeriod(options) and do not specify a value for the options.type parameter, the default value of this property is query.PeriodType.START.
+	 */
+	readonly type: string;
+}
+
+/**
+ * Special object which can be used as a condition while querying dates
+ *
+ * @since 2019.1
+ */
+export interface RelativeDate {
+
+	/**
+	 * Start of relative date
+	 * @throws {SuiteScriptError} READ_ONLY_PROPERTY when setting the property is attempted
+	 *
+	 * @since 2019.1
+	 */
+	readonly start: Object;
+
+	/**
+	 * End of relative date
+	 * @throws {SuiteScriptError} READ_ONLY_PROPERTY when setting the property is attempted
+	 *
+	 * @since 2019.1
+	 */
+	readonly end: Object;
+
+	/**
+	 * Interval of relative date
+	 * @throws {SuiteScriptError} READ_ONLY_PROPERTY when setting the property is attempted
+	 *
+	 * @since 2019.1
+	 */
+	readonly interval: Object;
+
+	/**
+	 * Value of relative date
+	 * @throws {SuiteScriptError} READ_ONLY_PROPERTY when setting the property is attempted
+	 *
+	 * @since 2019.1
+	 */
+	readonly value: Object;
+
+	/**
+	 * Flag if this relative date represents range
+	 * @throws {SuiteScriptError} READ_ONLY_PROPERTY when setting the property is attempted
+	 *
+	 * @since 2019.1
+	 */
+	readonly isRange: boolean;
+
+	/**
+	 * Id of relative date
+	 * @throws {SuiteScriptError} READ_ONLY_PROPERTY when setting the property is attempted
+	 *
+	 * @since 2019.1
+	 */
+	readonly dateId: Object;
+
+	/**
+	 * Returns the object type name (query.RelativeDate)
+	 *
+	 * @since 2019.1
+	 */
+	toString(): string;
+
+	/**
+	 * get JSON format of the object
+	 *
+	 * @since 2019.1
+	 */
+	toJSON(): any;
 }

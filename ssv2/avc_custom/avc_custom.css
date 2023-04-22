@@ -1,0 +1,13 @@
+.avc_view_status {
+    display: inline-block;
+    font-size: 14px;
+    font-weight: bold;
+    text-transform: uppercase;
+    padding: 3px;
+    background-color: #d5e0ec;
+    position: relative;
+}
+
+.avc_sublist_warning {
+    background-color: #FFF4F4;
+}

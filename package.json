@@ -4,7 +4,8 @@
   "devDependencies": {
     "@hitc/netsuite-tools": "^3.0.1",
     "@hitc/netsuite-types": "^2021.2.15",
-    "@hitc/netsuite-upload": "^2.0.6"
+    "@hitc/netsuite-upload": "^2.0.6",
+    "@types/intl": "^1.2.0"
   },
   "dependencies": {
     "ts-migrate": "^0.1.26"

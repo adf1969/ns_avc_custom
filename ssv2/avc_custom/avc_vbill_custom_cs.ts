@@ -15,10 +15,19 @@ import search = require("N/search");
 import {LookupValueObject} from "N/search";
 // @ts-ignore
 import format = require("N/format");
+// @ts-ignore
+import message = require("N/ui/message");
 
+// @ts-ignore
+import * as avc from './avc_util';    // For SOME reason, if this is ./avc_util, it BREAKS.
+
+// @ts-ignore
+let NS_BILL_EXPENSE_SUBLIST_ID = 'expense';
+// @ts-ignore
+let NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_ID = 'custcol_avc_ending_bal';
 export let postSourcing: EntryPoints.Client.postSourcing = (context: EntryPoints.Client.postSourcingContext) => {
   // @ts-ignore
-  log.debug('postSourcing', `context.fieldId: ${context.fieldId}`);
+  log.debug('BEGIN: postSourcing', `context.fieldId: ${context.fieldId}`);
 
   // SUBSIDIARY field
   if (context.fieldId == 'subsidiary') {
@@ -57,13 +66,212 @@ export let postSourcing: EntryPoints.Client.postSourcing = (context: EntryPoints
 } // POSTSOURCING
 
 export let fieldChanged: EntryPoints.Client.fieldChanged = (context: EntryPoints.Client.fieldChangedContext) => {
-  log.debug('fieldChanged', JSON.stringify(context));
+  log.debug('BEGIN: fieldChanged', JSON.stringify(context));
 
+  // Update TranID
   if (['trandate', 'location', 'memo'].includes(context.fieldId)) {
     updateTranId(context);
   }
 
+  // Check Ending Balance against Actual Posted Balance
+  if (['custbody_avc_ending_bal'].includes(context.fieldId)) {
+    checkEndingBalance(context);
+  }
+
+  //TODO: Add checking ending balance when changing the Expense.Account field.
+  // Not sure if this belongs in PostSource or here.
+  if ((['expense'].includes(context.sublistId)) &&
+      (['amount', 'custcol_avc_ending_bal'].includes(context.fieldId))) {
+    checkSublistEndingBalance(context);
+  }
+
+
+
 } // FIELDCHANGED
+
+
+// Check Ending Balance against Actual Posted Balance
+// Sublist id: expense
+// Sublist expense Fields:
+//    account: Account
+//    amount: amount in entry
+//
+export function checkEndingBalance(context: EntryPoints.Client.fieldChangedContext) {
+  let stLogTitle = 'checkEndingBalance';
+  log.debug(stLogTitle + ':context', JSON.stringify(context));
+
+  let cRecord = context.currentRecord;
+  let sEndingBal:string = cRecord.getValue({fieldId: 'custbody_avc_ending_bal'}).toString();
+  log.debug(stLogTitle + ':Ending Balance', sEndingBal);
+  let numEndingBal = Number(sEndingBal);
+
+  // Get the list of Expense Records - need to see if any of them are accounts of type Long Term Liability
+  let expCount = cRecord.getLineCount({
+    sublistId: 'expense',
+  });
+  if (expCount == 0) {    // There are no Expense Records, do nothing
+    return false;
+  }
+  log.debug(stLogTitle + ':# of Expense Lines', expCount);
+
+  // Subsidiary
+  let subId = cRecord.getValue({fieldId: 'subsidiary'});
+  log.debug(`${stLogTitle}:subId:`, subId);
+
+  // Location
+  let locId = cRecord.getValue({fieldId: 'location'});
+  log.debug(`${stLogTitle}:locId:`, locId);
+
+  // TranDate
+  let tranDate = cRecord.getValue({fieldId: 'trandate'});
+  log.debug(`${stLogTitle}:billDate:`, tranDate);
+  let tranDateCriteria = format.format({value: tranDate, type: format.Type.DATE});
+  log.debug(`${stLogTitle}:billDateCriteria:`, tranDateCriteria);
+
+
+  // Loop thru expense Records...looking for those Accounts that are Liability accts
+  for (let iLine=0; iLine<expCount; iLine++) {
+    let acctId = cRecord.getSublistValue( {
+      sublistId: 'expense',
+      fieldId: 'account',
+      line: iLine
+    });
+    let sAmount = cRecord.getSublistValue( {
+      sublistId: 'expense',
+      fieldId: 'amount',
+      line: iLine
+    });
+    log.debug(stLogTitle + ': acctId, amount', `${acctId}, ${sAmount}`);
+
+    // Test Load from avc Module
+    //@ts-ignore
+    //let test = avc.testFunction(acctId);
+    // Is this Account the right type?
+    let [sAcctBalance, sAccountText] = getAccountBalance(acctId, subId, locId, tranDateCriteria);
+    log.debug(`${stLogTitle}:acctBalance`, JSON.stringify(sAcctBalance));
+    log.debug(`${stLogTitle}:sAccountText`, JSON.stringify(sAccountText));
+    if (sAcctBalance) {
+      // Add to current value in row and compare to Ending Balance variable - they SHOULD match
+      let numAcctBalance = Number(sAcctBalance);
+      let numAmount = Number(sAmount);
+      let numSystemEndingBal = numAcctBalance - numAmount;
+      log.debug(`${stLogTitle}:numAcctBalance - numAccount = numSystemEndingBal:`, `${numAcctBalance} - ${numAmount} = ${numSystemEndingBal}`);
+      if (numSystemEndingBal == numEndingBal) {
+        // MATCH: System Internal Balance & Entered Ending Balance Match
+        let myMsg = message.create({
+          title: 'Ending Balance Matches',
+          message: `System Internal Balance for account ${sAccountText} of: ${formatToCurrency(numSystemEndingBal)} equals entered Ending Balance of:  ${formatToCurrency(numEndingBal)}.`,
+          type: message.Type.CONFIRMATION
+        });
+        myMsg.show({
+          duration: 10000 // disappears after 10 sec
+        });
+      } else {
+        // NO MATCH: System Internal Balance & Entered Ending Balance DO NOT MATCH
+        let nDelta = numEndingBal - numSystemEndingBal;
+        let sMsg = `System Internal Balance for account ${sAccountText} of: ${formatToCurrency(numSystemEndingBal)} DOES NOT equal entered Ending Balance of:  ${formatToCurrency(numEndingBal)}.<br>`;
+        sMsg += `Entered Ending Balance is off by: ${formatToCurrency(nDelta)}.`;
+        let myMsg = message.create({
+          title: 'Ending Balance Does not Match',
+          message: sMsg,
+          type: message.Type.WARNING
+        });
+        myMsg.show(); // Show forever.
+      }
+      // Once we process ONE Liability Acct, Exit the For loop
+      break;
+    }
+  }
+}
+
+// Check Ending Balance against Actual Posted Balance
+// Sublist id: expense
+// Sublist expense Fields:
+//    account: Account
+//    amount: amount in entry
+//
+// noinspection DuplicatedCode
+export function checkSublistEndingBalance(context: EntryPoints.Client.fieldChangedContext) {
+  let stLogTitle = 'checkSublistEndingBalance';
+  log.debug(stLogTitle + ':context', JSON.stringify(context));
+
+  let cRecord = context.currentRecord;  // Sublist Record
+  log.debug(stLogTitle + ':cRecord', JSON.stringify(cRecord));
+  let acctId = cRecord.getCurrentSublistValue({
+    sublistId: context.sublistId,
+    fieldId: 'account'
+  });
+  log.debug(stLogTitle + ':acctId', acctId);
+  let sAmount:string = cRecord.getCurrentSublistValue({
+    sublistId: context.sublistId,
+    fieldId: 'amount'
+  }).toString();
+  log.debug(stLogTitle + ':sAmount', sAmount);
+  let numAmount = Number(sAmount);
+  let sEndingBal:string = cRecord.getCurrentSublistValue({
+    sublistId: context.sublistId,
+    fieldId: NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_ID
+  }).toString();
+  let numEndingBal = Number(sEndingBal);
+  log.debug(stLogTitle + ':sEndingBal', sEndingBal);
+
+  // If there is an Amount and an Ending Balance, run a Check
+  if ((numAmount != 0) || (numEndingBal != 0)) {
+    // Subsidiary
+    let subId = cRecord.getValue({fieldId: 'subsidiary'});
+    log.debug(`${stLogTitle}:subId:`, subId);
+
+    // Location
+    let locId = cRecord.getValue({fieldId: 'location'});
+    log.debug(`${stLogTitle}:locId:`, locId);
+
+    // TranDate
+    let tranDate = cRecord.getValue({fieldId: 'trandate'});
+    log.debug(`${stLogTitle}:billDate:`, tranDate);
+    let tranDateCriteria = format.format({value: tranDate, type: format.Type.DATE});
+    log.debug(`${stLogTitle}:billDateCriteria:`, tranDateCriteria);
+
+    let [sAcctBalance, sAccountText] = getAccountBalance(acctId, subId, locId, tranDateCriteria);
+    log.debug(`${stLogTitle}:acctBalance`, JSON.stringify(sAcctBalance));
+    log.debug(`${stLogTitle}:sAccountText`, JSON.stringify(sAccountText));
+
+    if (sAcctBalance) {
+      // Add to current value in row and compare to Ending Balance variable - they SHOULD match
+      let numAcctBalance = roundTo(sAcctBalance, 2);
+      let numAmount = roundTo(sAmount, 2);
+      let numSystemEndingBal = roundTo(numAcctBalance - numAmount, 2);
+      log.debug(`${stLogTitle}:numAcctBalance - numAccount = numSystemEndingBal:`, `${numAcctBalance} - ${numAmount} = ${numSystemEndingBal}`);
+      if (numSystemEndingBal == numEndingBal) {
+        // MATCH: System Internal Balance & Entered Ending Balance Match
+        let myMsg = message.create({
+          title: 'Ending Balance Matches',
+          message: `System Internal Balance for account ${sAccountText} of: ${formatToCurrency(numSystemEndingBal)} equals entered Ending Balance of:  ${formatToCurrency(numEndingBal)}.`,
+          type: message.Type.CONFIRMATION
+        });
+        myMsg.show({
+          duration: 10000 // disappears after 10 sec
+        });
+      } else {
+        // NO MATCH: System Internal Balance & Entered Ending Balance DO NOT MATCH
+        let nDelta = numEndingBal - numSystemEndingBal;
+        let sMsg = `System Internal Balance for account ${sAccountText} of: ${formatToCurrency(numSystemEndingBal)} DOES NOT equal entered Ending Balance of:  ${formatToCurrency(numEndingBal)}.<br>`;
+        sMsg += `Entered Ending Balance is off by: ${formatToCurrency(nDelta)}.`;
+        let myMsg = message.create({
+          title: 'Ending Balance Does not Match',
+          message: sMsg,
+          type: message.Type.WARNING
+        });
+        myMsg.show(); // Show forever.
+      }
+    }
+  }
+
+}
+
+//@ts-ignore
+function getActualBalance(acountId: Number, asOfDate: Date) {
+
+}
 
 // Update the TranId to fit the following Format:
 //  YYYY-MM-DD-<Vendor>-<Loc-PropCode>
@@ -203,3 +411,92 @@ function getEntityShCode(entityId) {
   }
 }
 
+
+// COMMON UTIL CODE
+
+//@ts-ignore
+enum NAccountType {
+  Expense = 'Expense',
+  LongTermLiability = 'LongTermLiab'
+}
+
+// @ts-ignore
+function roundTo(n, place) {
+  //return Number(Number(n).toFixed(place));
+  return Number(parseFloat(n).toFixed(place));
+}
+
+// @ts-ignore
+function formatToCurrency(amount : number) : string {
+  amount = (typeof amount !== 'undefined' && amount !== null) ? amount : 0;
+  return "$" + (amount).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
+}
+
+//@ts-ignore
+function getAccountBalance(acctId, subId, locId, tranDateCriteria) {
+  let stLogTitle = 'getAccountBalance';
+  if (!acctId) return [false, false];
+  log.debug(`${stLogTitle}:acctId`, acctId);
+
+  // Function Scope Vars
+  let acctBalResults :  search.Search | false = false;
+  // @ts-ignore
+  let resultAccount : string = '';
+  let resultSumOfAmount : string = '';
+
+  let result = search.lookupFields({
+    type: search.Type.ACCOUNT,
+    id: acctId,
+    columns: ['name', 'number', 'type', 'balance'],
+  });
+  log.debug(`${stLogTitle}:result`, JSON.stringify(result));
+  if (result) {
+
+    let acctType = result.type[0].value;      // To get the Value from lookupFields, deref the Array object and get the .value or .text
+    log.debug(`${stLogTitle}:acctType`, acctType);
+    if (acctType == NAccountType.LongTermLiability) {
+      log.debug(`${stLogTitle}:Liability Acct:`, `${result.number} | ${result.name}`);
+      // Get the Account Balance as of the Date of the Current Bill
+      // https://stackoverflow.com/questions/40188497/performing-a-sum-or-grouped-query-in-suitescript-2-0
+      try {
+        const tranSearchColAccount = search.createColumn({ name: 'account', summary: search.Summary.GROUP });
+        const tranSearchColAmount = search.createColumn({ name: 'amount', summary: search.Summary.SUM });
+        let acctBalSearch = search.create({
+          type: search.Type.TRANSACTION,
+          columns: [
+            tranSearchColAccount,
+            tranSearchColAmount
+          ],
+          filters: [
+            ['subsidiary', search.Operator.ANYOF, subId],
+            'AND',
+            // DO NOT FILTER BY LOCATION - the various AJEs entered by the CPA RARELY have Locations Entered
+            // ONLY filter by Subsidiary
+            //['location', search.Operator.ANYOF, locId],
+            //'AND',
+            ['account', search.Operator.ANYOF, acctId],
+            'AND',
+            ['trandate', search.Operator.BEFORE, tranDateCriteria]
+          ]
+        });
+        //@ts-ignore
+        acctBalResults = acctBalSearch.run().getRange({start: 0, end: 1});
+        //let acctBalResults = acctBalSearch.run();
+        log.debug(`${stLogTitle}:acctBalResults(1)`, JSON.stringify(acctBalResults));
+
+        if (acctBalResults) {
+          resultAccount = <string>acctBalResults[0].getText(tranSearchColAccount);
+          resultSumOfAmount = <string>acctBalResults[0].getValue(tranSearchColAmount);
+        }
+      } catch (error) {
+        log.error(stLogTitle, error.message);
+        log.error(stLogTitle + ':error', JSON.stringify(error));
+        return [false, false];
+      }
+      log.debug(`${stLogTitle}:acctBalResults(2)`, JSON.stringify(acctBalResults));
+    }
+    return [resultSumOfAmount, resultAccount];
+  } else {
+    return [false, false];
+  }
+}

@@ -20,11 +20,12 @@ import query = require('N/query');
 import {Query} from "N/query";
 import runtime = require('N/runtime');
 import redirect = require('N/redirect');
+// TODO: Migrate from using avc_vendloclist_main_util to using avc_sl_util
 // @ts-ignore
 import * as avm from "./avc_vendloclist_main_util";
 import onRequest = EntryPoints.Suitelet.onRequest;
 import onRequestContext = EntryPoints.Suitelet.onRequestContext;
-import {dateToYMDHms} from "./avc_vendloclist_main_util";
+import {dateToYMD, dateToYMDHms, getFolderIdFromPath} from "./avc_vendloclist_main_util";
 
 // DOES NOT WORK SINCE NetSuite doesn't have Intl!
 // Usage:
@@ -72,19 +73,45 @@ function onRequestGet(ctx: onRequestContext) {
 	});
 	form.clientScriptModulePath = './avc_vendloclist_main_cs.js';
 
-
 	// @ts-ignore
 	let vendorList = avm.getVendorList(true);
+
+	// Main Group
+	let mainGroupId = 'custpage_avc_maingroup';
+	// @ts-ignore
+	let mainGroup = form.addFieldGroup({
+		id: mainGroupId,
+		label: 'Main'
+	});
 
 	// Add the Export Name Field
 	let vendorList_exportName = form.addField( {
 		id: `${formId}_export_name`,
 		type: serverWidget.FieldType.TEXT,
-		label: 'Export Name'
+		label: 'Export Set Name',
+		container: mainGroupId
 	});
 	vendorList_exportName.defaultValue = '';
 
+	// Get Destination Folder ID
+	let dateStrY = dateToYMD(new Date(), '').substr(0,4);
+	let rootFolderPath = 'SuiteApps\\avc.vendorloclist';
+	rootFolderPath += '\\' + dateStrY;
+	let rootFolderId = 	getFolderIdFromPath(rootFolderPath);
+	log.debug(stLogTitle, 'rootFolderId: ' + rootFolderId);
+	let folderLabel = "SA\\avc.vendorloclist\\" + dateStrY;
+	let folderId = 'custpage_avc_urlfolderlink_root';
+	let folderHtml = avm.buildFolderLink(rootFolderId, folderLabel, `File Cabinet Root Folder:`, folderId);
+	let folderLink = form.addField({
+		id: folderId,
+		type: serverWidget.FieldType.INLINEHTML,
+		label: `${folderLabel}:`,
+		container: mainGroupId
+	});
+	folderLink.defaultValue = folderHtml;
+
 	// FOR TESTING ---
+	/*
 	let vendorList_json = form.addField({
 		id: `${formId}_json`,
 		type: serverWidget.FieldType.LONGTEXT,
@@ -92,6 +119,7 @@ function onRequestGet(ctx: onRequestContext) {
 	});
 	// @ts-ignore
 	vendorList_json.defaultValue = JSON.stringify(vendorList);
+	 */
 
 
 	// Build List from Vendors
@@ -132,6 +160,13 @@ function onRequestGet_UpdateCSVFiles(ctx: onRequestContext) {
 
 	// --- Create/Update CSV Files ---
 
+	let folderGroupId = 'custpage_avc_foldergroup';
+	// @ts-ignore
+	let folderGroup = form.addFieldGroup({
+		id: folderGroupId,
+		label: 'CSV Folder'
+	});
+
 	// Get Destination Folder ID
 	let destFolderId = avm.getDestFolderId(exportName);
 	log.debug(stLogTitle, 'destFolderId: ' + destFolderId);
@@ -141,9 +176,20 @@ function onRequestGet_UpdateCSVFiles(ctx: onRequestContext) {
 	let folderLink = form.addField({
 		id: folderId,
 		type: serverWidget.FieldType.INLINEHTML,
-		label: `${folderLabel}:`
+		label: `${folderLabel}:`,
+		container: folderGroupId
 	});
 	folderLink.defaultValue = folderHtml;
+
+
+	// File Group
+	let fileGroupId = 'custpage_avc_filegroup';
+	// @ts-ignore
+	let fileGroup = form.addFieldGroup({
+		id: fileGroupId,
+		label: 'CSV Files'
+	});
+	fileGroup.isSingleColumn = true;
 
 	// Create BCD-Account List CSV File -------------
 	// @ts-ignore
@@ -154,18 +200,38 @@ function onRequestGet_UpdateCSVFiles(ctx: onRequestContext) {
 	let alFileLink = form.addField({
 		id: alFieldId,
 		type: serverWidget.FieldType.INLINEHTML,
-		label: `${alFieldLabel}:`
+		label: `${alFieldLabel}:`,
+		container: fileGroupId
 	});
 	alFileLink.defaultValue = alFileHtml;
 
 
 	// Create BCD-Owner List CSV File ---------------
-	// @ts-ignore
-	//let olFile = avm.createBcdOwnerList_CSVFile(destFolderId);
+	let olFile = avm.createBcdOwnerList_CSVFile(destFolderId);
+	let olFieldLabel = 'BCD-Owner List File';
+	let olFieldId = 'custpage_avc_urlfilelink_bcd_ownerlist';
+	let olFileHtml = avm.buildFileLink(olFile, olFieldLabel, olFieldId);
+	let olFileLink = form.addField({
+		id: olFieldId,
+		type: serverWidget.FieldType.INLINEHTML,
+		label: `${olFieldLabel}:`,
+		container: fileGroupId
+	});
+	olFileLink.defaultValue = olFileHtml;
 
 
 	// Create BCD-Signer List CSV File --------------
-
+	let slFile = avm.createBcdSignerList_CSVFile(destFolderId);
+	let slFieldLabel = 'BCD-Signer List File';
+	let slFieldId = 'custpage_avc_urlfilelink_bcd_signerlist';
+	let slFileHtml = avm.buildFileLink(slFile, slFieldLabel, slFieldId);
+	let slFileLink = form.addField({
+		id: slFieldId,
+		type: serverWidget.FieldType.INLINEHTML,
+		label: `${slFieldLabel}:`,
+		container: fileGroupId
+	});
+	slFileLink.defaultValue = slFileHtml;
 
 
 	response.writePage(form);

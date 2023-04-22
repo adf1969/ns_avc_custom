@@ -8,26 +8,81 @@
  * Purpose: Purpose: AVC Customizations to Vendor Bill Form - User Event Script
  */
 
+// noinspection DuplicatedCode
+
 import {EntryPoints} from "N/types";
 import log = require('N/log');
 import search = require("N/search");
 import serverWidget = require('N/ui/serverWidget');
+import {checkEndingBalance} from "./avc_vbill_custom_cs";
 //import record = require('N/record');
+import format = require("N/format");
+import {addAvcCustomCSS} from "./avc_util";
+
+let NS_BILL_EXPENSE_SUBLIST_ID = 'expense';
+let NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_ID = 'custcol_avc_ending_bal';
+// @ts-ignore
+let NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_V_ID = 'custcol_avc_ending_bal_v';
+let HTML_CHECK = '&check;';
+let HTML_WARNING = '&#9888;';
 
 export function beforeLoad(context: EntryPoints.UserEvent.beforeLoadContext) {
   let stLogTitle = 'beforeLoad';
+
+  let form = context.form;
+
+  // Add AVC CSS File
+  // Ensure Custom CSS has been added to Form
+  addAvcCustomCSS(form);
+
+  let bHideExpense_EndingBalView = true;    // Default is to HIDE this field
   // Only run in Create/Edit/Copy/View Modes
   if ([context.UserEventType.CREATE, context.UserEventType.COPY,
     context.UserEventType.EDIT, context.UserEventType.VIEW].includes(context.type)) {
-    log.debug('Before Load', context.type);
+    log.debug(`${stLogTitle}:context.type`, context.type);
 
-    //let newRec = context.newRecord;
-    let form = context.form;
-    let slExpense = form.getSublist({id:'expense'});
+    // Expense Sublist
+    let slExpense = form.getSublist({id:NS_BILL_EXPENSE_SUBLIST_ID});
+
+    // Main Section
+    // Only Display if:
+    //  Not in Edit Mode or View Mode
+    //  Account is a Liability Account
+    let bHideEndingBalanceCol = !([context.UserEventType.EDIT, context.UserEventType.VIEW].includes(context.type)) || getHideEndingBalCol(slExpense);
+    if (bHideEndingBalanceCol) {
+      log.debug(`${stLogTitle}`, 'HIDE:Ending Balance');
+      slExpense.getField({id: NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_ID}).updateDisplayType({displayType: serverWidget.FieldDisplayType.HIDDEN});
+    }
+
+    //TODO: Convert the entire Account / Ending Balance Code to an Object to clean up all the messy variable logic
+    //TODO: Figure out a way to put that Object in a Util.ts file so it can be loaded both in avc_vbill_custom_ue and avc_vbill_custom_cs files
+
+    if ((!bHideEndingBalanceCol) && ([context.UserEventType.VIEW].includes(context.type))) {
+      log.debug(`${stLogTitle}`, 'HIDE:Ending Balance, SHOW:Ending Balance View');
+      slExpense.getField({id: NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_ID}).updateDisplayType({displayType: serverWidget.FieldDisplayType.HIDDEN});
+      bHideExpense_EndingBalView = false; // Not sure WHY I can't set the updateDisplayType, but it does NOT work when I set it to SHOW, so I have to do this.
+      checkExpenseEndingBalValues(context);
+    }
+
+
     // Remove Columns from the Expense Sublist that we don't need
     slExpense.getField({id: 'category'}).updateDisplayType({displayType: serverWidget.FieldDisplayType.HIDDEN})
     slExpense.getField({id: 'department'}).updateDisplayType({displayType: serverWidget.FieldDisplayType.HIDDEN})
     slExpense.getField({id: 'class'}).updateDisplayType({displayType: serverWidget.FieldDisplayType.HIDDEN})
+
+    // Add Validate Mortgage Pmt Button
+    //TODO: I need to add Client Script that adds the callCheckEndingBalance() code since this code is ONLY on the server.
+    /*
+    form.addButton({
+      id: 'custpage_avc_validate_mge',
+      label: 'Validate Mortgage Pmt',
+      functionName: 'callCheckEndingBalance()'
+    })
+     */
+
+    if (bHideExpense_EndingBalView) {
+      slExpense.getField({id: NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_V_ID}).updateDisplayType({displayType: serverWidget.FieldDisplayType.HIDDEN});
+    }
   }
 
   // Only run in View Mode
@@ -136,9 +191,265 @@ export function beforeLoad(context: EntryPoints.UserEvent.beforeLoadContext) {
         }
       }
     }
+  } // Only View Mode
+
+}
+
+//@ts-ignore
+enum NAccountType {
+  Expense = 'Expense',
+  LongTermLiability = 'LongTermLiab'
+}
+
+function getHideEndingBalCol(slExpense : serverWidget.Sublist) : boolean {
+  let stLogTitle = 'getHideEndingBalCol';
+  log.debug(`${stLogTitle}: slExpense`, JSON.stringify(slExpense));
+  let bHideEndingBalCol = true;   // Default is to HIDE the Ending Balance Column
+
+  // Loop thru Expense Sublist and look for Accounts that Match, to SHOW the Ending Balance Column
+  // Get count of line-items
+
+  let lineCount = slExpense.lineCount;
+  log.debug(`${stLogTitle}: lineCount:`, lineCount);
+
+  // Loop thru each line item and check Account Type
+  for (let iLine=0; iLine < lineCount; iLine++) {
+    let lineAcctId = slExpense.getSublistValue({
+      id: 'account',
+      line: iLine
+    });
+    log.debug(`${stLogTitle}: lineAcctId:`, lineAcctId);
+    let acctType = getAccountType(lineAcctId);
+    if (acctType == NAccountType.LongTermLiability) {
+      bHideEndingBalCol = false;
+      break;
+    }
+  }
+
+  return bHideEndingBalCol;
+}
+
+function checkExpenseEndingBalValues(context: EntryPoints.UserEvent.beforeLoadContext) {
+  let stLogTitle = 'checkExpenseEndingBalValues';
+  log.debug(stLogTitle + ':context', JSON.stringify(context));
+
+  let form = context.form;
+
+  // Expense Sublist
+  let slExpense = form.getSublist({id:NS_BILL_EXPENSE_SUBLIST_ID});
+  log.debug(stLogTitle + ':slExpense', JSON.stringify(slExpense));
+  let expCount = slExpense.lineCount;
+
+  //let idCustEb = 'custpage_' + NS_BILL_EXPENSE_SUBLIST_ID + '_' + 'avc_htmleb';
+
+
+  for (let iLine=0; iLine<expCount; iLine++) {
+    // Update Existing Ending Balance Field
+    let ebvHtml = buildEndingBalanceViewLink(context, iLine);
+    slExpense.setSublistValue({
+      id: NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_V_ID,
+      line: iLine,
+      value: ebvHtml
+    });
+
   }
 
 }
+
+export function buildEndingBalanceViewLink(context: EntryPoints.UserEvent.beforeLoadContext , sublistLine: number) : string {
+  let stLogTitle = 'buildEndingBalanceViewLink'
+  let form = context.form;
+  log.debug(`${stLogTitle}: form (${sublistLine}`, JSON.stringify(form));
+
+  // Expense Sublist
+  let slExpense = form.getSublist({id:NS_BILL_EXPENSE_SUBLIST_ID});
+  log.debug(`${stLogTitle}: slExpense (${sublistLine}`, JSON.stringify(slExpense));
+
+  let lineAcctId = slExpense.getSublistValue({
+    id: 'account',
+    line: sublistLine
+  });
+
+  let sEndingBal = slExpense.getSublistValue( {
+    id: NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_ID,
+    line: sublistLine
+  });
+  let cEndingBal = (sEndingBal) ? formatToCurrency(Number(sEndingBal)) : "";
+
+  let bAccountIsLiability = isAccountLiabilityType(lineAcctId);
+  let cssMatch = "";
+  let statusMark = "";
+  let bMatch = false;
+  let dataNsTooltip = "";
+  if (bAccountIsLiability) {
+    [bMatch, dataNsTooltip] = AccountBalanceMatchesEndingBalance(context, sublistLine);
+    if (bMatch) {
+      // Account Balance Matches Ending Balance Entered
+      statusMark = ` ${HTML_CHECK}`;
+    } else {
+      // Account Balance DOES NOT MATCH Ending Balance Entered
+      cssMatch = "avc_sublist_warning";
+      statusMark = ` ${HTML_WARNING}`;
+    }
+  }
+
+  // Now create the Link to put on the page.
+  // /app/reporting/reportrunner.nl?reporttype=REGISTER&acctid=1154
+  let fileUrl = `/app/reporting/reportrunner.nl?reporttype=REGISTER&acctid=${lineAcctId}`;
+  let ebLinkHtml = '';
+  ebLinkHtml += `<span align="right">`;
+  ebLinkHtml += `<a class="dottedlink ${cssMatch}" target="_blank" data-ns-tooltip="${dataNsTooltip}" href="${fileUrl}" target="_blank">${cEndingBal}${statusMark}</a>`;
+  ebLinkHtml += '</span>';
+
+  return ebLinkHtml;
+}
+
+
+// @ts-ignore
+function getAccountType(acctId) {
+  let stLogTitle = 'getAccountType';
+  if (!acctId) return [false, false];
+  log.debug(`${stLogTitle}:acctId`, acctId);
+
+  let result = search.lookupFields({
+    type: search.Type.ACCOUNT,
+    id: acctId,
+    columns: ['name', 'number', 'type', 'balance'],
+  });
+  log.debug(`${stLogTitle}:result`, JSON.stringify(result));
+  if (result) {
+    let acctType = result.type[0].value;      // To get the Value from lookupFields, deref the Array object and get the .value or .text
+    log.debug(`${stLogTitle}:acctType`, acctType);
+
+    return acctType;
+  }
+
+  return false;
+}
+
+
+// @ts-ignore
+function AccountBalanceMatchesEndingBalance(context: EntryPoints.UserEvent.beforeLoadContext, sublistLine: number) : [boolean, string] {
+  let stLogTitle = 'AccountBalanceMatchesEndingBalance';
+  let form = context.form;
+  log.debug(`${stLogTitle}:form`, form);
+  log.debug(`${stLogTitle}:sublistLine`, sublistLine);
+
+  let dataNsTooltip = "";
+  let rec = context.newRecord;
+  let slExpense = form.getSublist({id:NS_BILL_EXPENSE_SUBLIST_ID});
+
+  let lineAcctId = slExpense.getSublistValue({
+    id: 'account',
+    line: sublistLine
+  });
+
+  let sAmount = slExpense.getSublistValue( {
+    id: 'amount',
+    line: sublistLine
+  });
+
+  let sEndingBal = slExpense.getSublistValue( {
+    id: NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_ID,
+    line: sublistLine
+  });
+  log.debug(`${stLogTitle}:Expense.Ending Balance`, sEndingBal);
+  let numEndingBal = Number(sEndingBal);
+
+  let subId = rec.getValue('subsidiary');
+  let locId = rec.getValue('location');
+
+  // TranDate
+  let tranDate = rec.getValue({fieldId: 'trandate'});
+  log.debug(`${stLogTitle}:billDate:`, tranDate);
+  let tranDateCriteria = format.format({value: tranDate, type: format.Type.DATE});
+  log.debug(`${stLogTitle}:billDateCriteria:`, tranDateCriteria);
+
+  // @ts-ignore
+  let [sAcctBalance, sAccountText] = getAccountBalance(lineAcctId, subId, locId, tranDateCriteria);
+
+
+  let numAcctBalance = roundTo(sAcctBalance, 2);
+  let numAmount = roundTo(sAmount, 2);
+  let numSystemEndingBal = roundTo(numAcctBalance - numAmount, 2);
+  log.debug(`${stLogTitle}:numAcctBalance - numAccount = numSystemEndingBal:`, `${numAcctBalance} - ${numAmount} = ${numSystemEndingBal}`);
+  if (numSystemEndingBal == numEndingBal) {
+    dataNsTooltip = `Internal Balance as of ${tranDateCriteria} of ${formatToCurrency(numSystemEndingBal)} matches ${formatToCurrency(numEndingBal)}`;
+    return [true, dataNsTooltip];
+  }
+  dataNsTooltip = `Internal Balance as of ${tranDateCriteria} of ${formatToCurrency(numSystemEndingBal)} DOES NOT MATCH ${formatToCurrency(numEndingBal)}`
+  return [false, dataNsTooltip];
+}
+
+// @ts-ignore
+function getAccountBalance(acctId, subId, locId, tranDateCriteria) {
+  let stLogTitle = 'getAccountBalance';
+  if (!acctId) return [false, false];
+  log.debug(`${stLogTitle}:acctId`, acctId);
+
+  // Function Scope Vars
+  let acctBalResults :  search.Search | false = false;
+  // @ts-ignore
+  let resultAccount : string = '';
+  let resultSumOfAmount : string = '';
+
+  let result = search.lookupFields({
+    type: search.Type.ACCOUNT,
+    id: acctId,
+    columns: ['name', 'number', 'type', 'balance'],
+  });
+  log.debug(`${stLogTitle}:result`, JSON.stringify(result));
+  if (result) {
+
+    let acctType = result.type[0].value;      // To get the Value from lookupFields, deref the Array object and get the .value or .text
+    log.debug(`${stLogTitle}:acctType`, acctType);
+    if (acctType == NAccountType.LongTermLiability) {
+      log.debug(`${stLogTitle}:Liability Acct:`, `${result.number} | ${result.name}`);
+      // Get the Account Balance as of the Date of the Current Bill
+      // https://stackoverflow.com/questions/40188497/performing-a-sum-or-grouped-query-in-suitescript-2-0
+      try {
+        const tranSearchColAccount = search.createColumn({ name: 'account', summary: search.Summary.GROUP });
+        const tranSearchColAmount = search.createColumn({ name: 'amount', summary: search.Summary.SUM });
+        let acctBalSearch = search.create({
+          type: search.Type.TRANSACTION,
+          columns: [
+            tranSearchColAccount,
+            tranSearchColAmount
+          ],
+          filters: [
+            ['subsidiary', search.Operator.ANYOF, subId],
+            'AND',
+            // DO NOT FILTER BY LOCATION - the various AJEs entered by the CPA RARELY have Locations Entered
+            // ONLY filter by Subsidiary
+            //['location', search.Operator.ANYOF, locId],
+            //'AND',
+            ['account', search.Operator.ANYOF, acctId],
+            'AND',
+            ['trandate', search.Operator.BEFORE, tranDateCriteria]
+          ]
+        });
+        //@ts-ignore
+        acctBalResults = acctBalSearch.run().getRange({start: 0, end: 1});
+        //let acctBalResults = acctBalSearch.run();
+        log.debug(`${stLogTitle}:acctBalResults(1)`, JSON.stringify(acctBalResults));
+
+        if (acctBalResults) {
+          resultAccount = <string>acctBalResults[0].getText(tranSearchColAccount);
+          resultSumOfAmount = <string>acctBalResults[0].getValue(tranSearchColAmount);
+        }
+      } catch (error) {
+        log.error(stLogTitle, error.message);
+        log.error(stLogTitle + ':error', JSON.stringify(error));
+        return [false, false];
+      }
+      log.debug(`${stLogTitle}:acctBalResults(2)`, JSON.stringify(acctBalResults));
+    }
+    return [resultSumOfAmount, resultAccount];
+  } else {
+    return [false, false];
+  }
+}
+
 
 // @ts-ignore
 function getFirstAttachedFileIdFields(recordType : string, recordId) : [false | search.Result, number] {
@@ -183,6 +494,26 @@ function getFirstAttachedFileIdFields(recordType : string, recordId) : [false | 
   }
   return [false, 0];
 
+}
+
+// @ts-ignore
+function isAccountLiabilityType(acctId) : boolean {
+  let stLogTitle = 'isAccountLiabilityType';
+  let result = search.lookupFields({
+    type: search.Type.ACCOUNT,
+    id: acctId,
+    columns: ['name', 'number', 'type', 'balance'],
+  });
+  if (result) {
+    let acctType = result.type[0].value;      // To get the Value from lookupFields, deref the Array object and get the .value or .text
+    log.debug(`${stLogTitle}:acctType`, acctType);
+    if (acctType == NAccountType.LongTermLiability) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+  return false;
 }
 
 // Get the Location Fields
@@ -263,4 +594,23 @@ function getBankAccountBalance(acctId) {
 // @ts-ignore
 function numberWithCommas(x) {
   return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+// @ts-ignore
+function roundTo(n, place) {
+  //return Number(Number(n).toFixed(place));
+  return Number(parseFloat(n).toFixed(place));
+}
+
+function formatToCurrency(amount : number) : string {
+  amount = (typeof amount !== 'undefined' && amount !== null) ? amount : 0;
+  return "$" + (amount).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
+}
+
+//TODO: Move the code below to ClientScript that is added to the page, otherwise this code will NEVER be accessible on the Client
+// @ts-ignore
+function callCheckEndingBalance() {
+  // @ts-ignore
+  let context = nlapiGetContext();
+  checkEndingBalance(context);
 }
