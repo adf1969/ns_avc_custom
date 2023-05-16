@@ -17,6 +17,8 @@ import query = require('N/query');
 // @ts-ignore
 import {url, file, format, error, search} from 'N';
 import {Type} from "N/record";
+import {Component, FieldContext} from "N/query";
+import {combineTranAcctList} from "./avc_accountbalrpt_main_sl";
 
 
 // INTERFACES
@@ -24,7 +26,8 @@ export interface ObjSql {
 	recordCount: number,
 	time: number,
 	records: Array<{ [fieldId: string]: string | boolean | number | null }>,
-	resultSet?: query.ResultSet
+	resultSet?: query.ResultSet,
+	columns?: query.Column[] | Column[],
 }
 
 // DATABASE FUNCTIONS
@@ -127,184 +130,821 @@ export function getAccountBalRptList(asLinks : boolean = false, qryCondition? : 
 	return qryAccountBalRptList;
 } // getAccountBalRptList
 
+export enum TranQueryTables {
+	Transaction = 'transaction',
+	TransactionLines = 'transactionlines',
+	AccountingImpact = 'accountingimpact',
+	Account = 'account',
+}
 
+export enum TranQueryFields {
+	ACCOUNT_Id = 'account.id',
+	ACCOUNT_AcctNumber = 'account.acctnumber',
+	ACCOUNT_AccountSearchDisplayNameCopy = 'account.accountsearchdisplaynamecopy',
+	ACCOUNT_AcctType = 'account.accttype',
+	TRANSACTION_Id = 'transaction.id',
+	TRANSACTION_Id_Display = 'transaction.id_display',
+	TRANSACTION_Date = 'transaction.trandate',
+	TRANSACTIONLINES_Subsidiary = 'transactionlines.subsidiary',
+	TRANSACTIONLINES_Subsidiary_Display = 'transactionlines.subsidiary_display',
+	TRANSACTIONLINES_ExpenseAccount = 'transactionlines.expenseaccount',
+	TRANSACTIONLINES_ExpenseAccount_Display = 'transactionlines.expenseaccount_display',
+	TRANSACTIONLINES_NetAmount = 'transactionlines.netamount',
+	TRANSACTIONLINES_EndingBalance = 'transactionlines.custcol_avc_ending_bal',
+	FORMULA_Internal_Ending_Bal_Diff = 'formula_int_end_bal_diff',
+}
 
-interface TranAcctBalQueryOptions {
+export interface CreateSortOptions {
+	fieldId: string;
+	ascending?: boolean;
+	nullsLast?: boolean;
+	caseSensitive?: boolean;
+	locale?: query.SortLocale;
+}
+
+export interface  TranAcctBalQueryOptionDisplayColumns {
+	 fieldId?: string; alias?: string; groupBy: boolean;
+		context?: string | query.FieldContext;
+		aggregate?: query.Aggregate;
+		formula?: string;
+		// TODO: remove the type property, I don't think it works.
+		type?: query.ReturnType;
+}
+
+export interface TranAcctBalQueryOptions {
+	subsidiaryId?: string;
 	accttype?: string | string[];
 	isinactive?: boolean;
 	trandateOnOrBefore?: string;
+	accountname?: string;
+	endingBalanceNotEmpty?: boolean;
+	filters?: Array<{ fieldId: string; operator: query.Operator; values: any[] }>;
+
+	// displayColumns: Array<{ fieldId?: string; alias?: string; groupBy: boolean;
+	// 	context?: string | query.FieldContext;
+	// 	aggregate?: query.Aggregate,
+	// 	formula?: string,
+	// 	// TODO: remove the type property, I don't think it works.
+	// 	type?: query.ReturnType,
+	// }>;
+	displayColumns: Array<TranAcctBalQueryOptionDisplayColumns>;
+	sortOptions?: CreateSortOptions;
+	// TODO: Implement resultLimit. There doesn't seem to be a way to do this with run() but perhaps with paged?
+	resultLimit?: number;
 }
 
+/*
+	* The order of building SQL Strings is as follows:
+	*   FROM & JOINs determine & filter rows
+	*   WHERE more filters on the rows
+	*   GROUP BY combines those rows into groups
+	*   HAVING filters groups
+	*   ORDER BY arranges the remaining rows/groups
+	*   LIMIT filters on the remaining rows/groups
+ */
+export function createAcctBalQuerySQL(options?: TranAcctBalQueryOptions): string {
+	let stLogTitle = 'createAcctBalQuerySQL';
+	let eOpt : EnhLogOptions = {
+		function: 'createAcctBalQuerySQL',
+		tags: ['AcctBal', 'Account'],
+	};
+	elog.debug(`options`, options, eOpt);
+
+	// Start building the SQL query string
+	let sqlQueryString = 'SELECT ';
+
+	// Build columns based on the displayColumns option
+	const columns: string[] = [];
+	const groupByColumns: string[] = [];
+
+	options.displayColumns.forEach((column, index) => {
+		if (column.fieldId) {
+			const [tableName, fieldName] = column.fieldId.split('.');
+			const alias = column.alias ? `AS "${column.alias}"` : '';
+
+			columns.push(`${tableName}.${fieldName} ${alias}`);
+
+			if (column.groupBy) {
+				groupByColumns.push(`${tableName}.${fieldName}`);
+			}
+		} else if (column.formula) {
+			const alias = column.alias ? `AS "${column.alias}"` : `AS "formula_column_${index}"`;
+
+			columns.push(`${column.formula} ${alias}`);
+		} else {
+			throw new Error('Invalid display column configuration');
+		}
+	});
+
+	// Add columns to the SQL query string
+	sqlQueryString += columns.join(', ');
+
+	// Simple Join Syntax
+	// sqlQueryString += `
+  //   FROM Transaction AS T
+  //   JOIN TransactionLines AS TL ON T.ID = TL.Transaction_ID
+  //   JOIN AccountingImpact AS AI ON TL.ID = AI.TransactionLines_ID
+  //   JOIN Account AS A ON AI.Account_ID = A.ID
+  // `;
+
+	// Complex Join Syntax
+	sqlQueryString += ` FROM ${TranQueryTables.Transaction} AS T `;
+
+	// Check if we need to join any tables
+	const joinTransactionLines = options.displayColumns.some(column =>
+			column.fieldId && (
+				column.fieldId.startsWith(`${TranQueryTables.TransactionLines}.`) ||
+				column.fieldId.startsWith(`${TranQueryTables.AccountingImpact}.`) ||
+				column.fieldId.startsWith(`${TranQueryTables.Account}.`)
+			)
+	);
+
+	const joinAccountingImpact = options.displayColumns.some(column =>
+			column.fieldId && (
+				column.fieldId.startsWith(`${TranQueryTables.AccountingImpact}.`) ||
+				column.fieldId.startsWith(`${TranQueryTables.Account}.`)
+			)
+	);
+
+	const joinAccount = options.displayColumns.some(column =>
+		column.fieldId && column.fieldId.startsWith(`${TranQueryTables.Account}.`)
+	);
+
+
+	// Add join clauses if needed
+	if (joinTransactionLines) {
+		sqlQueryString += ` JOIN ${TranQueryTables.TransactionLines} AS TL ON T.ID = TL.Transaction_ID `;
+	}
+
+	if (joinAccountingImpact) {
+		sqlQueryString += ` JOIN ${TranQueryTables.AccountingImpact} AS AI ON TL.ID = AI.TransactionLines_ID `;
+	}
+
+	if (joinAccount) {
+		sqlQueryString += ` JOIN ${TranQueryTables.Account} AS A ON AI.Account_ID = A.ID `;
+	}
+
+	// Build the WHERE clause with dynamic conditions
+	let conditions: string[] = [];
+
+	if (options?.subsidiaryId) {
+		const subsidiaryIds = Array.isArray(options.subsidiaryId) ? options.subsidiaryId : [options.subsidiaryId];
+		conditions.push(`TL.subsidiary IN (${subsidiaryIds.join(', ')})`);
+	}
+
+	if (options?.accttype) {
+		const acctTypeValues = Array.isArray(options.accttype) ? options.accttype : [options.accttype];
+		conditions.push(`A.accttype IN (${acctTypeValues.map(v => `'${v}'`).join(', ')})`);
+	}
+
+	if (options?.isinactive) {
+		conditions.push(`A.isinactive = ${options.isinactive}`);
+	}
+
+	if (options?.trandateOnOrBefore) {
+		conditions.push(`T.trandate <= '${options.trandateOnOrBefore}'`);
+	}
+
+	if (options?.accountname) {
+		conditions.push(`A.accountsearchdisplaynamecopy LIKE '%${options.accountname}%'`);
+	}
+
+	if (options?.endingBalanceNotEmpty) {
+		conditions.push(`TL.custcol_avc_ending_bal IS NOT NULL`);
+	}
+
+	if (conditions.length > 0) {
+		sqlQueryString += ` WHERE ${conditions.join(' AND ')} `;
+	}
+
+	// Add GROUP BY clause if there are any groupByColumns
+	if (groupByColumns.length > 0) {
+		sqlQueryString += ` GROUP BY ${groupByColumns.join(', ')} `;
+	}
+
+	// Add sorting options
+	if (options?.sortOptions) {
+		const sortField = options.sortOptions.fieldId.replace('.', '.');
+		const sortOrder = options.sortOptions.ascending ? 'ASC' : 'DESC';
+		sqlQueryString += ` ORDER BY ${sortField} ${sortOrder} `;
+	}
+
+	elog.debug(`sqlQueryString`, sqlQueryString, eOpt);
+	return sqlQueryString;
+}
+
+
+
 export function createAcctBalQuery(options?: TranAcctBalQueryOptions): query.Query {
+	let stLogTitle = 'createAcctBalQuery';
+	let eOpt : EnhLogOptions = {
+		function: 'createAcctBalQuery',
+		tags: ['AcctBal', 'Account', 'Query'],
+	};
+	//elog.addFunctions([eOpt.function]); // Include the current Function. Comment out to NOT include it.
+	elog.debug(`options`, options, eOpt);
+
 	const transactionQuery: query.Query = query.create({
 		type: query.Type.TRANSACTION,
 	});
 
-	/* Joins */
+	// JOINS ----------------------
 	const transactionLinesJoin = transactionQuery.autoJoin({
-		fieldId: 'transactionlines',
+		fieldId: "transactionlines",
 	});
 
 	const accountingImpactJoin = transactionLinesJoin.autoJoin({
-		fieldId: 'accountingimpact',
+		fieldId: "accountingimpact",
 	});
 
 	const accountJoin = accountingImpactJoin.autoJoin({
-		fieldId: 'account',
+		fieldId: "account",
 	});
 
-	/* Conditions */
+	// CONDITIONS ----------------------
 	const conditions: query.Condition[] = [];
 
+	// TransactionLines.subsidiary
+	if (options?.subsidiaryId) {
+		const subsidiaryIdValues = Array.isArray(options.subsidiaryId) ? options.subsidiaryId : [options.subsidiaryId];
+		const subsidiaryIdCondition = transactionLinesJoin.createCondition({
+			fieldId: "subsidiary",
+			operator: query.Operator.ANY_OF,
+			values: subsidiaryIdValues,
+		});
+		conditions.push(subsidiaryIdCondition);
+	}
+
+	// Account.accttype
 	if (options?.accttype) {
-		const acctTypeValues = Array.isArray(options.accttype)
-			? options.accttype
-			: [options.accttype];
+		const acctTypeValues = Array.isArray(options.accttype) ? options.accttype : [options.accttype];
 		const acctTypeCondition = accountJoin.createCondition({
-			fieldId: 'accttype',
+			fieldId: "accttype",
 			operator: query.Operator.ANY_OF,
 			values: acctTypeValues,
 		});
 		conditions.push(acctTypeCondition);
 	}
 
+	// Account.isinactive
 	if (options?.isinactive) {
 		const inactiveCondition = accountJoin.createCondition({
-			fieldId: 'isinactive',
+			fieldId: "isinactive",
 			operator: query.Operator.IS,
 			values: [options.isinactive],
 		});
 		conditions.push(inactiveCondition);
 	}
 
+	// Transaction.trandate
 	if (options?.trandateOnOrBefore) {
 		const dateCondition = transactionQuery.createCondition({
-			fieldId: 'trandate',
+			fieldId: "trandate",
 			operator: query.Operator.ON_OR_BEFORE,
 			values: [options.trandateOnOrBefore],
 		});
 		conditions.push(dateCondition);
 	}
 
+	// Account.accountsearchdisplaynamecopy
+	if (options?.accountname) {
+		const accountNameCondition = accountJoin.createCondition({
+			fieldId: "accountsearchdisplaynamecopy",
+			operator: query.Operator.CONTAIN,
+			values: [options.accountname],
+		});
+		conditions.push(accountNameCondition);
+	}
+
+	// transactionlines.custcol_avc_ending_bal !empty
+	if (options?.endingBalanceNotEmpty) {
+		const endingBalNotEmptyCondition = transactionLinesJoin.createCondition({
+			fieldId: "custcol_avc_ending_bal",
+			operator: query.Operator.EMPTY_NOT,
+			values: [],
+		});
+		conditions.push(endingBalNotEmptyCondition);
+	}
+
+	// FILTERS ----------------------
+	if (options?.filters) {
+		for (const filter of options.filters) {
+			let queryComponent: query.Query | query.Component;
+			const [componentId = 'transaction', fieldId] = filter.fieldId.split('.');
+			switch (componentId) {
+				case 'transaction':
+					queryComponent = transactionQuery;
+					break;
+				case 'transactionlines':
+					queryComponent = transactionLinesJoin;
+					break;
+				case 'accountingimpact':
+					queryComponent = accountingImpactJoin;
+					break;
+				case 'account':
+					queryComponent = accountJoin;
+					break;
+				default:
+					throw new Error('Invalid TextFilter option');
+			}
+			const filterValues = Array.isArray(filter.values) ? filter.values : [filter.values];
+			const newFilter = queryComponent.createCondition({
+				fieldId: fieldId,
+				operator: filter.operator,
+				values: filterValues,
+			});
+
+			conditions.push(newFilter);
+		}
+	} // FILTERS
+
 	// Uses the Spread Operator (...) to expand "conditions" to be an array of parameters.
 	if (conditions.length > 0) {
 		transactionQuery.condition = transactionQuery.and(...conditions);
 	}
 
-	/* Columns */
-	const transactionIdColumn = transactionQuery.createColumn({
-		fieldId: 'id',
-		groupBy: false,
-		alias: 'tranid',
-	});
+	// COLUMNS ----------------------
+	const columns: query.Column[] = [];
 
-	const transactionDisplayNameColumn = transactionQuery.createColumn({
-		fieldId: 'trandisplayname',
-		groupBy: false,
-		alias: 'trandisplayname',
-	});
+	for (const column of options.displayColumns) {
+		let queryComponent: query.Query | query.Component;
+		//const [columnId = 'transaction', fieldId] = column.fieldId.split('.');
+		const [columnId = 'transaction', fieldId] = column.fieldId?.split('.') ?? [];
+		elog.debug(`columnId,fieldId`, `${columnId}, ${fieldId}`, eOpt, ["detail", "column"]);
+		switch (columnId) {
+			case 'transaction':
+				queryComponent = transactionQuery;
+				break;
+			case 'transactionlines':
+				queryComponent = transactionLinesJoin;
+				break;
+			case 'accountimpact':
+				queryComponent = accountingImpactJoin;
+				break;
+			case 'account':
+				queryComponent = accountJoin;
+				break;
+			default:
+				throw new Error('Invalid DisplayColumn option');
+		}
 
-	const subsidiaryColumn = transactionLinesJoin.createColumn({
-		fieldId: 'subsidiary',
-		groupBy: false,
-		context: {
-			name: 'DISPLAY',
-		},
-		alias: 'subsidiary',
-	});
+		const newColumn = fieldId
+			? queryComponent.createColumn({
+				fieldId: fieldId,
+				groupBy: column.groupBy,
+				context: column.context,
+				alias: column.alias ?? column.fieldId,
+				aggregate: column.aggregate,
+			})
+			: queryComponent.createColumn({
+				formula: column.formula,
+				// TODO: remove the type property, I don't think it works.
+				type: column.type ?? query.ReturnType.STRING,
+				groupBy: column.groupBy,
+				alias: column.alias,
+			});
 
-	const accountIdColumn = accountJoin.createColumn({
-		fieldId: 'id',
-		groupBy: false,
-		alias: 'accountid',
-	});
+		elog.debug(`Push Column: ${column.fieldId}`, JSON.stringify(newColumn), eOpt, ["detail", "column"]);
+		columns.push(newColumn);
+	} // Dislay Columns
+	transactionQuery.columns = columns;
 
-	const inactiveColumn = accountJoin.createColumn({
-		fieldId: 'isinactive',
-		groupBy: false,
-		alias: 'isinactive',
-	});
+  // SORTING ----------------------
+	if (options?.sortOptions) {
+		let sortComponent: query.Query | query.Component;
+		const aliasId = options.sortOptions.fieldId;
+		const [componentId = 'transaction', fieldId] = options.sortOptions.fieldId.split('.');
+		switch (componentId) {
+			case 'transaction':
+				sortComponent = transactionQuery;
+				break;
+			case 'transactionlines':
+				sortComponent = transactionLinesJoin;
+				break;
+			case 'accountingimpact':
+				sortComponent = accountingImpactJoin;
+				break;
+			case 'account':
+				sortComponent = accountJoin;
+				break;
+			default:
+				throw new Error('Invalid sortOptions fieldId');
+		}
 
-	const accountTypeColumn = accountJoin.createColumn({
-		fieldId: 'accttype',
-		groupBy: false,
-		alias: 'accttype',
-	});
+		//let sortColumn = transactionQuery.columns.find(column => column.fieldId === fieldId);
+		let sortColumn = transactionQuery.columns.find(column => column.alias === aliasId);
+		elog.debug(`sortColumn`, JSON.stringify(sortColumn), eOpt, ["detail", "column", "sort"]);
 
-	const expenseAccountColumn = transactionLinesJoin.createColumn({
-		fieldId: 'expenseaccount',
-		groupBy: false,
-		context: {
-			name: 'DISPLAY',
-		},
-		alias: 'expenseaccount',
-	});
+		if (!sortColumn) {
+			elog.debug(`sortColumn not found, creating for fieldid:`, fieldId, eOpt, ["detail", "column", "sort"]);
+			sortColumn = sortComponent.createColumn({
+				fieldId: fieldId,
+			});
+			elog.debug(`sortColumn (new)`, JSON.stringify(sortColumn), eOpt, ["detail", "column", "sort"]);
+		}
 
-	const transactionDateColumn = transactionQuery.createColumn({
-		fieldId: 'trandate',
-		groupBy: false,
-		alias: 'trandate',
-	});
+		//log.debug(`${stLogTitle}:column[6]`, JSON.stringify(transactionQuery.columns[8]));
+		const newSort = sortComponent.createSort({
+			column: sortColumn,
+			//column: transactionQuery.columns[6],
+			ascending: options.sortOptions.ascending,
+			nullsLast: options.sortOptions.nullsLast,
+			caseSensitive: options.sortOptions.caseSensitive,
+			locale: options.sortOptions.locale,
+		});
 
-	const netAmountColumn = transactionLinesJoin.createColumn({
-		fieldId: 'netamount',
-		groupBy: false,
-		aggregate: query.Aggregate.SUM,
-		alias: 'netamount',
-	});
+		transactionQuery.sort = [newSort];
+	} // SORTING
 
-	const endingBalanceColumn = transactionLinesJoin.createColumn({
-		fieldId: 'custcol_avc_ending_bal',
-		groupBy: false,
-		alias: 'custcol_avc_ending_bal',
-	});
-
-	transactionQuery.columns = [
-		transactionIdColumn,
-		transactionDisplayNameColumn,
-		subsidiaryColumn,
-		accountIdColumn,
-		inactiveColumn,
-		accountTypeColumn,
-		expenseAccountColumn,
-		transactionDateColumn,
-		netAmountColumn,
-		endingBalanceColumn
-	];
-
+	//log.debug(`${stLogTitle}:transactionQuery`, JSON.stringify(transactionQuery));
+	elog.debug(`transactionQuery`, transactionQuery, eOpt)
 	return transactionQuery;
 }
 
-export function getAcctBalQueryResultSet1(options?: TranAcctBalQueryOptions): query.ResultSet {
-	const transactionQuery = createAcctBalQuery(options);
-	const searchResult = transactionQuery.run();
-	return searchResult;
-}
+
 
 export function getAcctBalQueryResultSet(options?: TranAcctBalQueryOptions): ObjSql {
+	let eOpt : EnhLogOptions = {
+		function: 'getAcctBalQueryResultSet',
+		tags: ['AcctBal', 'Account', 'Query'],
+	};
+	//elog.addFunctions([eOpt.function]); // Include the current Function. Comment out to NOT include it.
+	elog.debug(`options`, options, eOpt);
+
 	try {
 		const transactionQuery = createAcctBalQuery(options);
+		elog.debug(`transactionQuery`, transactionQuery, eOpt);
 		let beginTime = new Date().getTime();
-		const resultSet = transactionQuery.run();
+		let resultSet : query.ResultSet;
+		resultSet = transactionQuery.run();
 		let endTime = new Date().getTime();
 		let elapsedTime = endTime - beginTime;
 
-		let records = resultSet.asMappedResults();
+		let limitedResultSet : query.ResultSet;
+		if (options?.resultLimit) {
+			elog.debug(`resultLimit Specified. Slicing to resultLimit = `, options.resultLimit, {...eOpt, debug: false} );
+			const results = Array.from(resultSet.results);
+			const mappedResults = Array.from(resultSet.asMappedResults());
+			limitedResultSet = {
+				...resultSet,
+				results: options?.resultLimit ? results.slice(0, options.resultLimit) : results,
+				asMappedResults: function() {
+					return options?.resultLimit ? mappedResults.slice(0, options.resultLimit) : mappedResults;
+				},
+			};
+		} else {
+			elog.debug(`resultLimit NOT Specified. Returning all Records. Length = `, resultSet.results.length, {...eOpt, debug: false} );
+			limitedResultSet = resultSet;
+		}
+
+		let records = limitedResultSet.asMappedResults();
+
+		// Combine resultSet.columns & types so each column has the Type included as "type" field
+		// - This doesn't work, since the Column.type property is READONLY! Have to create ALL NEW Columns!
+		// const columnsExt = resultSet.columns.map((column, index) => ({
+		// 	...column,
+		// 	type: resultSet.types[index],
+		// 	type2: resultSet.types[index],
+		// }));
+		// log.debug(`${stLogTitle}:resultSet.columns`, JSON.stringify(resultSet.columns));
+		// log.debug(`${stLogTitle}:resultSet.types`, JSON.stringify(resultSet.types));
+		// log.debug(`${stLogTitle}:columnsExt`, JSON.stringify(columnsExt));
+
+		const columnsExt = combineColumnsAndTypes(limitedResultSet.columns, limitedResultSet.types);
+		elog.debug(`columnsExt`, JSON.stringify(columnsExt), eOpt);
 
 		let objSQL = {
 			recordCount: records.length,
 			time: elapsedTime,
 			records: records,
-			resultSet: resultSet
+			resultSet: limitedResultSet,
+			columns: columnsExt,
 		}
+		elog.debug(`objSql`, objSQL, eOpt, ["detail"]);
+
 		return objSQL;
 	} catch (e) {
-		log.error('Error getting AcctBalQueryResultSet - ' + e.name, e.message);
-		log.error('Error getting AcctBalQueryResultSet - ' + e.name + ' stacktrace:', e.stack);
+		elog.error(`Error getting AcctBalQueryResultSet - ` + e.name, e.message, eOpt);
+		elog.error(`Error getting AcctBalQueryResultSet - ` + e.name + ' stacktrace:', e.stack, eOpt);
 		return e + e.stack;
+	}
+
+}
+
+/*
+* processTranList: Processes a Transaction List and formats for Display by doing the following:
+	* Hiding columns that we don't need
+  * Setting the Label for Columns correctly
+  * If asLinks = True
+	  * Replace the Subsidiary text with a Link to the Subsidiary Record (if asLinks = True)
+	  * Replace the Acct# with a link to a Register View of the Account
+	  * Replace the Bill Name with a link to the Bill (if a Bill exists)
+  * Update the formula_int_end_bal_diff field with difference between the Internal and Ending Balance (if exists)
+  * By Type, setting the value so that it matches the return type
+*/
+export function processTranList(sqlList : ObjSql, asLinks : boolean = false): ObjSql {
+	let eOpt : EnhLogOptions = {
+		function: 'processTranList',
+		tags: ['detail']
+	};
+	//elog.addFunctions([eOpt.function]); // Include the current Function. Comment out to NOT include it.
+
+	//log.debug(`${stLogTitle}:asLinks`, asLinks);
+	elog.debug(`asLinks`, asLinks, eOpt);
+	//elog.debug('','DETAIL2', {...eOpt, tags:['detail2']});
+
+
+	// Set the Columns that I want to display
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.ACCOUNT_Id, "type", "HIDDEN");
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_Subsidiary, "type", "HIDDEN");
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_Subsidiary_Display, [
+		{property: "label", value: "Subsidiary"},
+	]);
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.ACCOUNT_AcctNumber, "type", "HIDDEN");
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.ACCOUNT_AccountSearchDisplayNameCopy, "type", "HIDDEN");
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_ExpenseAccount, "type", "HIDDEN");
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_ExpenseAccount_Display, [
+		{property: "label", value: "Account (Register View)"},
+	]);
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.ACCOUNT_AcctType, "type", "HIDDEN");
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_NetAmount, [
+		{property: "label", value: "Internal Balance"},
+		{property: "type", value: ReturnType.CURRENCY},
+	]);
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTION_Id, "type", "HIDDEN");
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTION_Id_Display, [
+		{property: "label", value: "End. Bal / Latest Bill"},
+	]);
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_EndingBalance, [
+		{property: "label", value: "Ending Balance"},
+		{property: "type", value: ReturnType.CURRENCY},
+	]);
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTION_Date, [
+		{property: "label", value: "End. Bal / Latest Bill Date"},
+		{property: "type", value: ReturnType.DATE},
+	]);
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.FORMULA_Internal_Ending_Bal_Diff, [
+		{property: "label", value: "Ending - Internal Bal Difference"},
+		{property: "type", value: ReturnType.CURRENCY},
+	]);
+
+	// Move Internal Balance to right BEFORE Ending Balance
+	const colAliasesBefore = sqlList.columns.map((column) => column.alias);
+	//log.debug(`${stLogTitle}:colAliasesBefore`, colAliasesBefore);
+	elog.debug(`colAliasesBefore`, colAliasesBefore, eOpt);
+	moveColumn(sqlList.columns, TranQueryFields.TRANSACTIONLINES_NetAmount, TranQueryFields.TRANSACTIONLINES_EndingBalance, "before");
+	const colAliasesAfter = sqlList.columns.map((column) => column.alias);
+	//log.debug(`${stLogTitle}:colAliasesAfter`, colAliasesAfter);
+	elog.debug(`colAliasesAfter`, colAliasesAfter, eOpt);
+
+	// Loop thru Records
+	let recs = sqlList.records;
+	let cols = sqlList.columns;
+	recs.forEach((rec, rIndex) => {
+		// Loop thru Columns - Set Values
+		cols.forEach((col, cIndex) => {
+			let cAlias = col.alias;
+			// Get the Value from the rec object
+			let cValue = rec[cAlias] ?? '';
+
+			// Fix Values based upon alias
+			switch (cAlias) {
+				case TranQueryFields.TRANSACTIONLINES_NetAmount:
+					// Reverse the value since this is a Liability acct, it needs to be inverted
+					rec[cAlias] = -Number(cValue);
+					break;
+			}
+
+			// Fix Values if this field is a Token field (begin/ends with [])
+			if ((cValue || '').toString().startsWith('[') && (cValue || '').toString().endsWith(']')) {
+				// Token String - fill with function result
+				//log.debug(`${stLogTitle}:cValue`, `${rIndex}|${cValue}`);
+				elog.debug(`cValue`, `${rIndex}|${cValue}`, eOpt);
+				let newValue = getTokenValue(cValue, rec, asLinks);
+				//value = "FILLED"; // this will NOT work
+				//rSet.results[indexR].values[indexV] = newValue;
+				rec[cAlias] = newValue;
+			}
+		}); // Loop thru cols.forEach() | for Values
+
+
+		// Loop thru Columns - Set Display
+		cols.forEach((col, cIndex) => {
+			let cAlias = col.alias;
+
+			// Get the Value from the rec object
+			let cValue = rec[cAlias] ?? '';
+
+			// Fix Values based upon Column alias
+			//log.debug(`${stLogTitle}:switch(cAlias)`, cAlias);
+			elog.debug(`switch(cAlias)`, cAlias, eOpt);
+			switch (cAlias) {
+				case 'companyname':
+					// Only update if asLinks = True
+					if (asLinks) {
+						// let sCompany = <string>values[1];
+						// let iCompanyId = <number>values[0];
+						// let newValue = getCompanyUrl(sCompany, iCompanyId);
+						// rSet.results[indexR].values[indexV] = newValue;
+					}
+					break;
+
+				case TranQueryFields.TRANSACTIONLINES_Subsidiary_Display:
+					if ((asLinks) && cValue) {
+						let sSubId = Number(rec[TranQueryFields.TRANSACTIONLINES_Subsidiary]);
+						let sSubsidiaryUrl = getSubsidiaryUrl(cValue.toString(), sSubId)
+						rec[cAlias] = sSubsidiaryUrl;
+					}
+					break;
+
+				case TranQueryFields.TRANSACTIONLINES_ExpenseAccount_Display:
+					if ((asLinks) && cValue) {
+						let sAccountId = Number(rec[TranQueryFields.TRANSACTIONLINES_ExpenseAccount]);
+						let sAccountRegUrl = getAccountRegisterUrl(cValue.toString(), sAccountId)
+						rec[cAlias] = sAccountRegUrl;
+					}
+					break;
+
+				case TranQueryFields.TRANSACTION_Id_Display:
+					if ((asLinks) && cValue) {
+						let sTranId = Number(rec[TranQueryFields.TRANSACTION_Id]);
+						let sTranUrl = getBillUrl(cValue.toString(), sTranId)
+						rec[cAlias] = sTranUrl;
+					}
+					break;
+			}
+
+			// Fix Values based upon Column fieldId
+			let cFieldId = col.fieldId;
+			//log.debug(`${stLogTitle}:switch(cFieldId)`, cFieldId);
+			elog.debug(`switch(cFieldId)`, cFieldId, eOpt);
+			switch (cFieldId) {
+				case 'vendor.custentity_avc_locid.name':
+					// Only update if asLinks = True
+					if (asLinks) {
+						// let sLocation = <string>value;
+						// let iLocId = <number>rec.id_1; // id_1 in this list holds this. If you change the Dataset, this MIGHT change!
+						// let newValue = getLocationUrl(sLocation, iLocId);
+						// rSet.results[indexR].values[indexV] = newValue;
+					}
+					break;
+			}
+			// Fix Values based upon Column type
+			let cType = col.type;
+			//log.debug(`${stLogTitle}:switch(cType)`, cType);
+			elog.debug(`switch(cType)`, cType, eOpt);
+			switch (cType) {
+				case 'PERCENT':
+					let percent = <number>cValue;
+					const displayPercent = `${(percent * 100).toFixed(2)}%`;
+					//rSet.results[indexR].values[indexV] = displayPercent;
+					rec[cAlias] = displayPercent;
+					break;
+				case 'CURRENCY':
+					let currency = <number>cValue;
+					//const displayCurrency = currency.toLocaleString("en-US", { style: "currency", currency: "USD"});
+					//log.audit(`${stLogTitle}:Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}`);
+					elog.debug(`Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}`, eOpt);
+					const displayCurrency = formatToCurrency(currency, false);
+					//rSet.results[indexR].values[indexV] = displayCurrency;
+					rec[cAlias] = displayCurrency;
+					//log.audit(`${stLogTitle}:Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}, after:${displayCurrency}`);
+					elog.debug(`Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}, after:${displayCurrency}`, eOpt);
+					break;
+			}
+
+		}); // Loop thru cols.forEach() | for Display
+
+	}); // Loop thru recs.forEach()
+
+	return sqlList;
+
+} // processTranList
+
+
+/*
+ * Combine 2 arrays of Columns into 1 array of Columns where there are no duplicates, based upon the alias field
+*/
+export function combineColumns(columns1: query.Column[] | Column[], columns2: query.Column[] | Column[]): Column[] {
+	let eOpt : EnhLogOptions = {
+		function: 'combineColumns',
+		tags: ['detail']
+	};
+	//elog.addFunctions([eOpt.function]); // Include the current Function. Comment out to NOT include it.
+	elog.debug("columns1", columns1, eOpt);
+	elog.debug("columns2", columns2, eOpt);
+
+	// Create a new array that contains all the columns in columns1
+	const combinedColumns: Column[] = [...columns1];
+
+	// Search for any column in column2, if it doesn't exist, add it to the combinedColumns array.
+	for (const column2 of columns2) {
+		const existingColumn = combinedColumns.find((column1) => column1.alias === column2.alias);
+
+		if (!existingColumn) {
+			combinedColumns.push(column2);
+		}
+	}
+
+	// Update the aliasId property for all columns in combinedColumns
+	for (const column of combinedColumns) {
+		if (column.aliasId === undefined) {
+			column.aliasId = column.alias.replace(/\./g, "_");
+		}
+	}
+
+	// Return the array of combinedColumns
+	elog.debug("combinedColumns", combinedColumns, eOpt);
+	return combinedColumns;
+}
+
+export function moveColumn1(columns: query.Column[] | Column[], columnToMoveAlias: string, locationAlias: string, position: 'before' | 'after'): void {
+	const columnToMove = columns.find((c) => c.alias === columnToMoveAlias);
+	const locationColumn = columns.find((c) => c.alias === locationAlias);
+
+	if (columnToMove && locationColumn) {
+		const index = columns.indexOf(locationColumn);
+		if (position === 'before') {
+			columns.splice(index, 0, columnToMove);
+			columns.splice(columns.indexOf(columnToMove) + 1, 1);
+		} else {
+			columns.splice(index + 1, 0, columnToMove);
+			columns.splice(columns.indexOf(columnToMove), 1);
+		}
 	}
 }
 
+function moveColumn(columns: (query.Column[] | Column[]), columnToMoveAlias: string, locationAlias: string, position: 'before' | 'after'): void {
+	const column = columns.find((c) => c.alias === columnToMoveAlias);
+	if (!column) {
+		elog.error('moveColumn', `Column with alias "${columnToMoveAlias}" not found.`,
+			{function: 'onRequestPost',
+				tags: ['Request', 'Post'],});
+		return;
+	}
+
+	const locationColumn = columns.find((c) => c.alias === locationAlias);
+	if (!locationColumn) {
+		elog.error('moveColumn', `Column with alias "${locationAlias}" not found.`,
+			{function: 'onRequestPost',
+				tags: ['Request', 'Post'],});
+		return;
+	}
+
+	const currentIndex = columns.indexOf(column);
+	const locationIndex = columns.indexOf(locationColumn);
+
+	let targetIndex, resultIndex;
+	if (position === 'before') {
+		targetIndex = locationIndex;
+		resultIndex = targetIndex - 1;
+		if (currentIndex === resultIndex) {
+			// Column is already in the desired position, nothing to do
+			return;
+		}
+		targetIndex = (currentIndex < locationIndex) ? targetIndex-1 : targetIndex;
+	} else {
+		targetIndex = locationIndex + 1;
+		resultIndex = targetIndex;
+		if (currentIndex === resultIndex) {
+			// Column is already in the desired position, nothing to do
+			return;
+		}
+	}
+
+	// Remove the column from the current position - this ensures that any adds go where they are SUPPOSED to go
+	columns.splice(currentIndex, 1);
+	// Insert the column at the target position
+	columns.splice(targetIndex, 0, column);
+	return;
+}
+
+// export function setColumnValueByAlias(columns: Column[], alias: string, property: string, value: any): void {
+// 	const matchingColumn = columns.find((c) => c.alias === alias);
+// 	if (matchingColumn) {
+// 		matchingColumn[property] = value;
+// 	}
+// }
+
+export function setColumnValueByAlias(columns: Column[], alias: string, properties: { property: string, value: any }[]): void;
+export function setColumnValueByAlias(columns: Column[], alias: string, property: string, value: any): void;
+export function setColumnValueByAlias(columns: any[], alias: string, arg2: any, arg3?: any): void {
+	const matchingColumn = columns.find((c) => c.alias === alias);
+	if (matchingColumn) {
+		if (typeof arg3 === 'undefined') {
+			// handle case where we were passed an array of properties to set
+			const properties = arg2 as { property: string, value: any }[];
+			for (const { property, value } of properties) {
+				matchingColumn[property] = value;
+			}
+		} else {
+			// handle case where we were passed a single property and value to set
+			const property = arg2 as string;
+			const value = arg3;
+			matchingColumn[property] = value;
+		}
+	}
+}
 
 
 
@@ -344,7 +984,7 @@ export function getSignerList(asLinks? : boolean = false): ObjSql {
 	return qrySignerList;
 }
 
-// @ts-ignore
+
 export function processList(sqlList : ObjSql, asLinks : boolean = false): ObjSql {
 	let stLogTitle = 'processList';
 	log.debug(`${stLogTitle}:asLinks`, asLinks);
@@ -369,7 +1009,7 @@ export function processList(sqlList : ObjSql, asLinks : boolean = false): ObjSql
 			if ((value || '').toString().startsWith('[') && (value || '').toString().endsWith(']')) {
 				// Token String - fill with function result
 				log.debug(`${stLogTitle}:value1`, `${indexR}|${value}`);
-				let newValue = getTokenValue(value, asLinks);
+				let newValue = getTokenValue(value, {}, asLinks);
 				//value = "FILLED"; // this will NOT work
 				rSet.results[indexR].values[indexV] = newValue;
 			}
@@ -429,7 +1069,8 @@ export function processList(sqlList : ObjSql, asLinks : boolean = false): ObjSql
 
 	log.debug(`${stLogTitle}:rSet.results`, JSON.stringify(rSet.results));
 	return sqlList;
-}
+} // processList
+
 
 // @ts-ignore
 export function getResultFromQuery(qry: Query) : ObjSql {
@@ -602,7 +1243,11 @@ export function createQryCondition(qry : query.Query, options: CreateConditionOp
 // TOKEN FUNCTIONS
 
 // @ts-ignore
-export function getTokenValue(strToken : any, asLinks? : boolean = false) : any {
+export function getTokenValue(strToken : any, rec?: {[p:string] : string | number | boolean}, asLinks? : boolean = false) : any {
+	let eOpt : EnhLogOptions = {
+		function: 'getTokenValue',
+		tags: ['Token'],
+	};
 	// Ensure strToken is a String
 	let str = (strToken || '').toString();
 
@@ -611,10 +1256,23 @@ export function getTokenValue(strToken : any, asLinks? : boolean = false) : any 
 
 	// Get the Function to Call & Args
 	let [fName, id] = str.split(',');
-	log.debug('getTokenValue:fName,id', `${fName},${id}`);
+	elog.debug('fName,id', `${fName},${id}`, eOpt);
 
 	let retVal = '';
 	switch (fName) {
+		case TranQueryFields.FORMULA_Internal_Ending_Bal_Diff:
+			// Delta/Diff Value = rec.EndingBal - rec.InternalBal (if exists)
+			//if (TranQueryFields.TRANSACTIONLINES_EndingBalance in rec) {
+			if (rec[TranQueryFields.TRANSACTIONLINES_EndingBalance] != null) {
+				let internalBal = Number(rec[TranQueryFields.TRANSACTIONLINES_NetAmount] ?? 0);
+				let endingBal = Number(rec[TranQueryFields.TRANSACTIONLINES_EndingBalance] ?? 0);
+				let deltaBal = endingBal - internalBal;
+				retVal = deltaBal.toString();
+			} else {
+				// Set field value to ' '
+				retVal = ' ';
+			}
+			break;
 		case 'getKeyPrincipalText':
 			retVal = getKeyPrincipalText(id, asLinks);
 			break;
@@ -629,7 +1287,7 @@ export function getTokenValue(strToken : any, asLinks? : boolean = false) : any 
 			break;
 	}
 
-	log.debug('getTokenValue:retVal', `${retVal}`);
+	elog.debug('retVal', `${retVal}`, eOpt);
 	return retVal;
 }
 
@@ -807,6 +1465,61 @@ export function getLocationUrl(sLocation : string, iLocId : number) : string {
 	return sLocationUrlText
 
 }
+
+export function getSubsidiaryUrl(urlText : string, itemId : number) : string {
+	let stLogTitle = "getSubsidiaryUrl";
+	let eOpt : EnhLogOptions = {
+		function: 'getSubsidiaryUrl',
+		tags: ['Subsidiary', 'Url'],
+	};
+	elog.debug(`${stLogTitle} (urlText, itemId)`, `${urlText}, ${itemId}`, eOpt, "detail");
+
+	const sItemUrl = url.resolveRecord({
+		recordType: Type.SUBSIDIARY,
+		recordId: itemId,
+		isEditMode: false
+	});
+	elog.debug(`${stLogTitle}:sItemUrl`, sItemUrl, eOpt, "detail");
+	let sItemText = `<a target="_blank" href="${sItemUrl}">${urlText}</a>`
+	return sItemText
+}
+
+
+
+export function getAccountRegisterUrl(urlText : string, itemId : number) : string {
+	let stLogTitle = "getAccountRegisterUrl";
+	let eOpt : EnhLogOptions = {
+		function: 'getAccountRegisterUrl',
+		tags: ['Account', 'Url'],
+	};
+	elog.debug(`${stLogTitle} (urlText, itemId)`, `${urlText}, ${itemId}`, eOpt, "detail");
+
+	const sItemUrl = `/app/reporting/reportrunner.nl?acctid=${itemId}&reload=T&reporttype=REGISTER`;
+
+	elog.debug(`${stLogTitle}:sItemUrl`, sItemUrl, eOpt, "detail");
+	let sItemText = `<a target="_blank" href="${sItemUrl}">${urlText}</a>`
+	return sItemText
+}
+
+export function getBillUrl(urlText : string, itemId : number) : string {
+	let stLogTitle = "getBillUrl";
+	let eOpt : EnhLogOptions = {
+		function: 'getBillUrl',
+		tags: ['Bill', 'Url'],
+	};
+	elog.debug(`${stLogTitle} (urlText, itemId)`, `${urlText}, ${itemId}`, eOpt, "detail");
+
+	const sItemUrl = url.resolveRecord({
+		recordType: Type.VENDOR_BILL,
+		recordId: itemId,
+		isEditMode: false
+	});
+	elog.debug(`${stLogTitle}:sItemUrl`, sItemUrl, eOpt, "detail");
+	let sItemText = `<a target="_blank" href="${sItemUrl}">${urlText}</a>`
+	return sItemText
+}
+
+
 
 // --------------------------------------------------------------------------
 // CSV File Generation
@@ -1162,9 +1875,12 @@ export function getFileIdFields(recordType : string, recordId) : [false | search
 
 // ----------------------
 // UTILITY
-export function formatToCurrency(amount : number) : string {
+export function formatToCurrency(amount : number, showZeros?: boolean) : string {
 	amount = (typeof amount !== 'undefined' && amount !== null) ? amount : 0;
-	return "$" + (amount).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
+	if ((!showZeros) && (amount == 0)) {
+		return ' ';
+	}
+	return "$" + Number(amount).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,');
 }
 
 // Returns Date in the Format: YYYY-MM-DD
@@ -1210,21 +1926,397 @@ function splitText(text: string, maxLength: number): string[] {
 	return result;
 }
 
-function logLarge(title: string,  logObject: object, maxLogLength: number = 3900) {
+
+// LOGGING ----------------------------------------------------------------
+/*
+export var gLogFunctions: string[] = [];
+export var gLogTags: string[] = [];
+*/
+
+/*
+ * Breaks a Large object into smaller chunks < the maxLogLength (3999 at this time).
+ * It outputs them in REVERSE order so they are easier to cut/paste, but still #s them in order
+ */
+export function logLarge(title: string,  logObject: object, maxLogLength: number = 3900) {
 	const logString = JSON.stringify(logObject);
 	const logChunks = splitText(logString, maxLogLength);
 
-	let iChunk = 1;
-	for (const chunk of logChunks) {
+	let iChunk = logChunks.length;
+	for (const chunk of logChunks.reverse()) {
 		log.debug(`${title} (${iChunk}/${logChunks.length}):`, chunk);
-		iChunk++;
+		iChunk--;
 	}
 }
 
 
+export interface LogOptions {
+	/** String to appear in the Title column on the Execution Log tab of the script deployment. Maximum length is 99 characters. */
+	title?: string;
+	/**
+	 * You can pass any value for this parameter.
+	 * If the value is a JavaScript object type, JSON.stringify(obj) is called on the object before displaying the value.
+	 * NetSuite truncates any resulting string over 3999 characters.
+	 */
+	details?: any;
+}
+
+export interface LogFunction {
+	(title: string, details: any): void;
+	(options: LogOptions): void;
+}
+
+export interface EnhLogOptions extends LogOptions {
+	function: string;
+	tags: string[];
+	breakLarge?: boolean;
+	outputTags?: boolean;
+
+	debug?: boolean;
+}
+
+/*
+interface eLog {
+	(title: string, details: any, options?: EnhLogOptions): void;
+	(options: EnhLogOptions): void;
+}
+
+export var logDebugV1: eLog = (arg1: any, arg2?: any, arg3?: EnhLogOptions) => {
+	let options: EnhLogOptions;
+
+	if (typeof arg1 === 'string') {
+		options = arg3 || { function: '', tags: [], details: '' };
+		// Prepend function name before title, if it exists
+		options.title = options.function ? `${options.function}:${arg1}` : arg1;
+		options.details = arg2;
+	} else {
+		options = arg1;
+	}
+
+	if (gLogFunctions.some(globalFunction => globalFunction.includes(options.function)) ||
+		options.tags.some(tag => gLogTags.includes(tag))) {
+		// Log should be output
+		log.debug(options.title, options.details);
+	}
+};
+*/
+
+export interface EnhLogFunction {
+	(title: string, details: any, options?: EnhLogOptions, additionalTags?: string | string[]): void;
+	(options: EnhLogOptions, additionalTags?: string | string[]): void;
+}
+
+class ELog {
+	private static instance: ELog;
+	private globalFunctions: string[] = [];
+	private globalTags: string[] = [];
+	private includeFunctions: string[] = [];
+	private excludeFunctions: string[] = [];
+	private includeTags: string[] = [];
+	private excludeTags: string[] = [];
+
+	private constructor() {}
+
+	public static getInstance(): ELog {
+		if (!ELog.instance) {
+			ELog.instance = new ELog();
+		}
+		return ELog.instance;
+	}
+
+	public setFunctions(functions: string[]): void {
+		this.globalFunctions = functions;
+		this.includeFunctions = functions.filter(func => !func.startsWith('!'));
+		this.excludeFunctions = functions.filter(func => func.startsWith('!')).map(func => func.slice(1));
+	}
+
+	public setTags(tags: string[]): void {
+		this.globalTags = tags;
+		this.includeTags = tags.filter(tag => !tag.startsWith('!'));
+		this.excludeTags = tags.filter(tag => tag.startsWith('!')).map(tag => tag.slice(1));
+	}
+
+
+	public addFunctions(functions: string[]): void {
+		this.globalFunctions = [...this.globalFunctions, ...functions];
+		this.includeFunctions = this.globalFunctions.filter(func => !func.startsWith('!'));
+		this.excludeFunctions = this.globalFunctions.filter(func => func.startsWith('!')).map(func => func.slice(1));
+	}
+
+	public addTags(tags: string[]): void {
+		this.globalTags = [...this.globalTags, ...tags];
+		this.includeTags = this.globalTags.filter(tag => !tag.startsWith('!'));
+		this.excludeTags = this.globalTags.filter(tag => tag.startsWith('!')).map(tag => tag.slice(1));
+	}
+
+	// Case Insensitive methods to REMOVE Functions/Tags from list
+	public delFunctions(functions: string[]): void {
+		const functionsLower = functions.map(func => func.toLowerCase());
+		this.globalFunctions = this.globalFunctions.filter(func => !functionsLower.includes(func.toLowerCase()));
+		this.includeFunctions = this.globalFunctions.filter(func => !func.startsWith('!'));
+		this.excludeFunctions = this.globalFunctions.filter(func => func.startsWith('!')).map(func => func.slice(1));
+	}
+
+	public delTags(tags: string[]): void {
+		const tagsLower = tags.map(tag => tag.toLowerCase());
+		this.globalTags = this.globalTags.filter(tag => !tagsLower.includes(tag.toLowerCase()));
+		this.includeTags = this.globalTags.filter(tag => !tag.startsWith('!'));
+		this.excludeTags = this.globalTags.filter(tag => tag.startsWith('!')).map(tag => tag.slice(1));
+	}
+
+	private genericLog(logFunc: LogFunction, arg1: any, arg2?: any, arg3?: EnhLogOptions, arg4?: string | string[]): void {
+		let options: EnhLogOptions;
+		let maxLogLength = 3999;
+		let stLogTitle = "genericLog";
+
+		if (options?.debug) {logFunc(`${stLogTitle}.arg1`, arg1);}
+		if (typeof arg1 === 'string') {
+			options = {...arg3} || { function: '', tags: [], details: '' };
+			options.title = options.function ? `${options.function}:${arg1}` : arg1;
+			options.details = typeof arg2 === 'object' ? JSON.stringify(arg2) : arg2.toString();
+		} else {
+			options = {...arg1};
+			options.details = typeof options.details === 'object' ? JSON.stringify(options.details) : options.details.toString();
+			options.title = options.function ? `${options.function}:${options.title}` : options.title;
+		}
+		// if options.breakLarge is not set, set to TRUE
+		options.breakLarge = options.breakLarge === undefined ? true : options.breakLarge;
+		// if options.outputTags is not set, set to TRUE
+		options.outputTags = options.outputTags === undefined ? true : options.outputTags;
+
+		// Add new tags
+		if (arg4) {
+			if (Array.isArray(arg4)) {
+				options.tags = [...options.tags, ...arg4];
+			} else {
+				options.tags.push(arg4);
+			}
+		}
+		if (options?.debug) {logFunc(`${stLogTitle}.options`, options);}
+
+		if (options.outputTags) {
+			let tagString = options.tags.length > 0 ? `(${options.tags.join(', ')})` : "";
+			options.title = tagString ? `${options.title} --- tags:${tagString} ---` : options.title;
+		}
+
+		// Case Sensitive Match
+		// let shouldInclude = this.includeFunctions.some(func => func.includes(options.function)) ||
+		// 	options.tags.some(tag => this.includeTags.includes(tag));
+		// let shouldExclude = this.excludeFunctions.some(func => func.includes(options.function)) ||
+		// 	options.tags.some(tag => this.excludeTags.includes(tag));
+
+		// Case InSensitive Match - Converts function/tags to LOWERCASE prior to match
+		let shouldInclude = this.includeFunctions.some(func => func.toLowerCase().includes(options.function.toLowerCase())) ||
+			options.tags.some(tag => this.includeTags.map(t => t.toLowerCase()).includes(tag.toLowerCase()));
+		let shouldExclude = this.excludeFunctions.some(func => func.toLowerCase().includes(options.function.toLowerCase())) ||
+			options.tags.some(tag => this.excludeTags.map(t => t.toLowerCase()).includes(tag.toLowerCase()));
+
+		if (options?.debug) {logFunc(`${stLogTitle}:shouldInclude, shouldExclude`, `${shouldInclude}, ${shouldExclude}`);}
+		if (shouldInclude && !shouldExclude) {
+			// Log should be output
+			if (options?.debug) {
+				logFunc(`${stLogTitle}.Log Should be Output. Title:`, options.title);
+				logFunc(`${stLogTitle}.Log Should be Output. Details:`, options.details);
+			}
+
+			if (options.breakLarge) {
+				if (options?.debug) {logFunc(`${stLogTitle}.options.breakLarge = TRUE`, options.breakLarge);}
+				const logString = options.details;
+				const logChunks = splitText(logString, maxLogLength);
+				let iChunk = logChunks.length;
+				for (const chunk of logChunks.reverse()) {
+					const title = logChunks.length > 1 ? `${options.title} (${iChunk}/${logChunks.length}):` : options.title;
+					logFunc(title, chunk);
+					iChunk--;
+				}
+			} else {
+				logFunc(options.title, options.details);
+			}
+		} else {
+			if (options?.debug) {
+				logFunc(`${stLogTitle}.Log Should NOT be Output. Title:`, options.title);
+				logFunc(`${stLogTitle}.Log Should NOT be Output. Details:`, options.details);
+			}
+		}
+	}
+
+	/**
+	 * This function logs debug messages. It is part of the ELog class.
+	 *
+	 * @param {any} arg1 - The title of the log or an object of type EnhLogOptions. If arg1 is a string, arg2 and arg3 are used for details and options respectively. If arg1 is an object, it is used as the options object directly.
+	 * @param {any} [arg2] - The details of the log. This parameter is used when arg1 is a string. If arg2 is an object, it will be stringified.
+	 * @param {EnhLogOptions} [arg3] - An optional parameter that specifies additional options for the log, such as function and tags. This parameter is used when arg1 is a string.
+	 * @param {string|string[]} [arg4] - An optional parameter that specifies additional tags. This can be a single tag as a string or an array of tags.
+	 *
+	 * @function
+	 * @example
+	 * // Using string arguments for title and details, and an options object
+	 * elog.debug('Title', 'Details', { function: 'function1', tags: ['tag1', 'tag2'] }, 'newTag');
+	 *
+	 * // Using an options object as the only argument
+	 * elog.debug({ title: 'Title', details: 'Details', function: 'function1', tags: ['tag1', 'tag2'] }, null, null, ['newTag1', 'newTag2']);
+	 *
+	 * elog.setFunctions(["function1", "!function2"]);
+	 * elog.setTags(["tag1", "!tag2"]);
+	 * elog.debug("Test", "This is a test log", { function: "function1", tags: ["tag1"] });
+	 * Setting Options Usage:
+	 * 	  let eOpt : EnhLogOptions = {
+	 * 		  function: 'processTranList',
+	 * 		  tags: ['detail']
+	 * 	  };
+	 * Then call with:
+	 *    elog.debug(`asLinks`, asLinks, eOpt);
+	 * Setting Additional eOpt when calling:
+	 *    Set eOpt as above, then call as follows:
+	 *    eLog.debug('Title','DETAIL2', {...eOpt, tags:['detail2']});
+	 *
+	 * @returns {void}
+	 */
+	public debug: EnhLogFunction = (arg1: any, arg2?: any, arg3?: EnhLogOptions, arg4?: string | string[]) => {
+		this.genericLog(log.debug, arg1, arg2, arg3, arg4);
+	}
+
+	public audit: EnhLogFunction = (arg1: any, arg2?: any, arg3?: EnhLogOptions, arg4?: string | string[]) => {
+		this.genericLog(log.audit, arg1, arg2, arg3, arg4);
+	}
+
+	public error: EnhLogFunction = (arg1: any, arg2?: any, arg3?: EnhLogOptions, arg4?: string | string[]) => {
+		this.genericLog(log.error, arg1, arg2, arg3, arg4);
+	}
+
+	public emergency: EnhLogFunction = (arg1: any, arg2?: any, arg3?: EnhLogOptions, arg4?: string | string[]) => {
+		this.genericLog(log.emergency, arg1, arg2, arg3, arg4);
+	}
+}
+
+// Global Log Object
+// Calling Usage:
+//  elog.setFunctions(["function1", "!function2"]);
+//  elog.setTags(["tag1", "!tag2"]);
+//  elog.debug("Test", "This is a test log", { function: "function1", tags: ["tag1"] });
+// Setting Options Usage:
+// 	  let eOpt : EnhLogOptions = {
+// 		  function: 'processTranList',
+// 		  tags: ['detail']
+// 	  };
+// Then call with:
+//    elog.debug(`asLinks`, asLinks, eOpt);
+// Setting Additional eOpt when calling:
+//    Set eOpt as above, then call as follows:
+//    eLog.debug('Title','DETAIL2', {...eOpt, tags:['detail2']});
+
+export const elog = ELog.getInstance();
+
+
+
+// export interface TypeMap {
+// 	[key: string]: string;
+// }
+
+export function combineColumnsAndTypes(columns: query.Column[], types: string[]): query.Column[] {
+	// const typeMap: TypeMap = {};
+	// types.forEach((type, index) => typeMap[index] = type);
+
+	const result: query.Column[] = [];
+	columns.forEach((column, index) => {
+		//const type = typeMap[index] || null;
+		const type = types[index];
+		const newColumn: query.Column = {
+			prototype: column.prototype,
+			fieldId: column.fieldId,
+			component: column.component,
+			formula: column.formula,
+			type: type,
+			aggregate: column.aggregate,
+			groupBy: column.groupBy,
+			label: column.label,
+			alias: column.alias,
+			context: column.context
+		};
+		result.push(newColumn);
+	});
+	return result;
+}
 
 // --------------------------------------------------------------
 // @hitc Non-Exported Interfaces - Added here so I can use them
+
+// Version of the Query.Column Interface that isn't 100% READONLY (which SUCKS!)
+export interface Column {
+	/**
+	 * Id of column field.
+	 * @throws {SuiteScriptError} READ_ONLY when setting the property is attempted
+	 */
+	readonly prototype: string;
+
+	/**
+	 * Query component. Returns the Component to which this column belongs.
+	 * @throws {SuiteScriptError} READ_ONLY when setting the property is attempted
+	 */
+	 component: Component;
+
+	/** Holds the name of the query result column. */
+	 fieldId: string;
+
+	/**
+	 * Formula.
+	 * @throws {SuiteScriptError} READ_ONLY when setting the property is attempted
+	 */
+	 formula: string;
+
+	/**
+	 * Desired value type of the formula (if it was explicitly stated upon Column creation).
+	 * @throws {SuiteScriptError} READ_ONLY when setting the property is attempted
+	 */
+	 type: string | ReturnType;
+
+	/**
+	 * Aggregate function (value from Aggregate enum).
+	 * @throws {SuiteScriptError} READ_ONLY when setting the property is attempted
+	 */
+	 aggregate: string;
+
+	/**
+	 * The group-by flag.
+	 * @throws {SuiteScriptError} READ_ONLY when setting the property is attempted
+	 */
+	 groupBy: boolean;
+
+	 label: string;
+	 alias: string;
+	 aliasId?: string; // This version of the alias is valid for custpage IDs (it has dots converted to _)
+
+	/** The field context for values in the query result column. */
+	 context: ColumnContextOptions;
+}
+
+export interface ColumnContextOptions {
+	/** The name of the field context. */
+	name: string | FieldContext,
+	/** The additional parameters to use with the specified field context. */
+	params?: {
+		/** The internal ID of the currency to convert to. */
+		currencyId?: number,
+		/** The date to use for the actual exchange rate between the base currency and the currency to convert to. */
+		date?: RelativeDate | Date
+	}
+}
+
+export enum ReturnType {
+	ANY = "ANY",
+	BOOLEAN = "BOOLEAN",
+	CURRENCY = "CURRENCY",
+	DATE = "DATE",
+	DATETIME = "DATETIME",
+	DURATION = "DURATION",
+	FLOAT = "FLOAT",
+	HIDDEN = "HIDDEN",
+	INTEGER = "INTEGER",
+	KEY = "KEY",
+	PERCENT = "PERCENT",
+	RELATIONSHIP = "RELATIONSHIP",
+	STRING = "STRING",
+	UNKNOWN = "UNKNOWN",
+}
 
 export interface CreateConditionOptions {
 	/** Field (column) id. Required if options.operator and options.values are used. */
