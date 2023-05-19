@@ -29,8 +29,12 @@ import onRequestContext = EntryPoints.Suitelet.onRequestContext;
 //import {dateToYMD, dateToYMDHms, getFolderIdFromPath} from "./avc_vendloclist_main_util";
 
 // @ts-ignore
-let gFilterFormId = 'custpage_avc_accountbalrpt';
-let gSublistName = 'avc_abrpt';
+// let gFilterFormId = 'custpage_avc_accountbalrpt';
+// let gSublistName = 'avc_abrpt';
+// let gFilterFormId = avm.gFilterFormId;
+// let gSublistName = avm.gSublistName;
+let gFilterFormId = avm.AcctBalSettings.FilterFormId;
+let gSublistName = avm.AcctBalSettings.SublistName;
 
 export const onRequest: EntryPoints.Suitelet.onRequest = (ctx) => {
 	log.debug('avc_sl_vendor_loc_list:onRequest', 'context: ' + JSON.stringify(ctx));
@@ -64,7 +68,7 @@ function onRequestGet(ctx: onRequestContext) {
 	let form = serverWidget.createForm({
 		title: 'Account Balance Report Main'
 	});
-	//form.clientScriptModulePath = './avc_accountbalrpt_main_cs.js';
+	form.clientScriptModulePath = './avc_accountbalrpt_main_cs.js';
 
 	// Create the filterForm
 	const filterForm = createFilterForm(form);
@@ -96,6 +100,7 @@ function onRequestPost(ctx: onRequestContext) {
 	let form = serverWidget.createForm({
 		title: 'Account Balance Report Main'
 	});
+	form.clientScriptModulePath = './avc_accountbalrpt_main_cs.js';
 
 	// @ts-ignore
 	const filterForm = createFilterForm(form);
@@ -110,25 +115,12 @@ function onRequestPost(ctx: onRequestContext) {
 	// elog.debug(`accountSearch`, JSON.stringify(accountSearch), eOpt);
 
 
-	// TEST-BEGIN Getting Data from DataSet ---------------
 	// Various FieldIds for Conditions:
 	// isinactive: 'accountingimpact.account.isinactive'
 	// accttype: 'accountingimpact.account.accttype'
 	// trandate: 'trandate' (this is on the actual Transaction, so no Join is necessary)
 	//
-	//TODO: Try and see if maybe I can get the component from the query.columns[] array, and if it matches
-	// add my Condition to THAT and see if that works
-	// let qryConditionAT = qry.createCondition({
-	// 	//fieldId: 'transaction.transactionlines.accountingimpact.account.accttype',
-	// 	fieldId: 'transactionlines.accountingimpact.account.accttype',
-	// 	operator: query.Operator.ANY_OF,
-	// 	values: [accountType]
-	// });
 
-	// let tranAcctBalList = avm.getAccountBalRptList(true, qryConditionAT);
-	// log.debug(`${stLogTitle}:tranAcctBalList`, JSON.stringify(tranAcctBalList));
-
-	// New Test, with creating the RptList 100% from Code/ChatGPT
 
 /*
 	// Add the AccountIds returned to the request.parameters array so they can be used in retrieving Ending Balance values
@@ -150,31 +142,7 @@ function onRequestPost(ctx: onRequestContext) {
 	let tranAcctBalList_Processed = getTranAcctList(request);
 
 	// Create the Sublist Form from the processed values
-	let vSubList = createAcctBalSublist(form, "acctbal_sublist", tranAcctBalList_Processed);
-
-	// TEST-END Getting Data from DataSet ---------------
-
-
-
-	// TEST SuiteQL - BEGIN
-
-	//const sqlResult = test_executeSuiteQL();
-	// elog.debug("sqlResult", sqlResult, eOpt);
-	// let sqlRecords = sqlResult.asMappedResults();
-	// elog.debug("sqlRecords", sqlRecords, eOpt);
-
-	// TEST SuiteQL - END
-
-
-	// Run the search and display the results in a sublist on the form
-	/*
-	const sublistName = gSublistName;
-
-	const searchResults = accountSearch.run();
-	log.debug(`${stLogTitle}:searchResults`, JSON.stringify(searchResults));
-
-	fillAccountSublist(form, searchResults, sublistName);
-	*/
+	let vSubList = createAcctBalSublist(form, gSublistName, tranAcctBalList_Processed);
 
 	response.writePage(form);
 }
@@ -450,11 +418,12 @@ export function createFilterForm(form: ui.Form): ui.Form {
 			text: accountType.text,
 		});
 	});
+	accountTypeField.defaultValue = "LongTermLiab"; // Set Default on initial Load to Long Term Liability
 
 	const dateField = form.addField({
 		id: `${gFilterFormId}_date`,
 		type: ui.FieldType.DATE,
-		label: 'Date (Ending Balances thru this date)',
+		label: 'Date (Internal and Ending Balances thru this date)',
 	});
 
 	const accountNameField = form.addField({
@@ -462,6 +431,56 @@ export function createFilterForm(form: ui.Form): ui.Form {
 		type: ui.FieldType.TEXT,
 		label: 'Account Name'
 	});
+
+	// Add Help Field
+	let bgNoEndingBal = avm.AcctBalSettings.BgColor_NoEndingBal;
+	let bgBalMismatch = avm.AcctBalSettings.BgColor_BalMismatch;
+	const helpTextField = form.addField({
+		id: `${gFilterFormId}_help`,
+		type: ui.FieldType.INLINEHTML,
+		label: ' ',
+	});
+	helpTextField.defaultValue =
+		`<span class='uir-label'>			
+				<h2 class="avc-help-toggle" style="margin-bottom: 0.5em;">Help Text:</h2>
+				<div class="avc-help-content" color:gray;'>
+					<div class='smallgraytext' style='color:gray;'>The list of Account/Account Names will always be grouped by 
+					<b>Subsidiary</b> and <b>Account</b>. The <b>Latest Bill</b> column will always display the most recent Bill posted prior to the filter Date specified.
+					The <b>Latest Bill Date</b> will specify the date of that Bill.
+					The <b>Internal Balance</b> will display the internal balance of all posted transactions for that account up to the filter Date specified.
+					If any of the transactions prior to the filter Date specified have an <b>Ending Balance</b> posted, that <b>Ending Balance</b> value will be 
+					displayed in the <b>Ending Balance</b> column. The <b>Ending Balance</b> will also provide a link to that Bill record. 
+					In addition, the <b>Ending Bal Date</b> will show the date of that transaction.
+					<br/>
+					If an <b>Ending Balance</b> is found, it will be subtracted from the <b>Internal Balance</b>, and the resultant value displayed (if non-zero).
+					This will only be helpful, if the most recent transation also has an <b>Ending Balance</b> posted.<br/>
+					<br/>
+					There are two situations when a row will be highlighted:<br/>
+					</div>				
+				  <div style="display: inline-block; width: 20px; height: 20px; background-color: ${bgNoEndingBal}; 
+				    margin-left: 10px; margin-top: 5px; margin-right: 5px; margin-bottom: 5px; vertical-align: middle;"></div>
+				  <span style="display: inline-block; margin: 0px; vertical-align: middle;">The Account has no Ending Balance specified.</span>
+				  <br>
+				  <div style="display: inline-block; width: 20px; height: 20px;	background-color: ${bgBalMismatch}; 
+				    margin-left: 10px; margin-top: 5px; margin-right: 5px; margin-bottom: 5px; vertical-align: middle;"></div>
+				  <span style="display: inline-block;  margin: 0px; vertical-align: middle;">The Account has and Ending Balance, but it does not match the Internal Balance.</span>
+			  </div>				
+		</span>`;
+	//helpTextField.layoutType = ui.FieldLayoutType.OUTSIDEBELOW;
+	helpTextField.updateBreakType({
+		breakType: ui.FieldBreakType.STARTCOL
+	});
+	helpTextField.updateDisplaySize({
+		width: 80,
+		height: 10
+	});
+	helpTextField.updateLayoutType({
+		layoutType: ui.FieldLayoutType.OUTSIDEBELOW
+	});
+	helpTextField.updateDisplayType({
+		displayType: ui.FieldDisplayType.DISABLED
+	});
+
 
 	// Add a submit button to the form
 	form.addSubmitButton({
@@ -879,9 +898,9 @@ export function getTranAcctEndingBalResults(request: ServerRequest) : avm.ObjSql
 }
 
 
-export function getTranAcct_EndingBalColumns() : avm.TranAcctBalQueryOptionDisplayColumns[] {
+export function getTranAcct_LastTranColumns() : avm.TranAcctBalQueryOptionDisplayColumns[] {
 
-	const endBalColumns = [
+	const columns = [
 		{
 			fieldId: avm.TranQueryFields.ACCOUNT_Id,
 			groupBy: true,
@@ -923,10 +942,10 @@ export function getTranAcct_EndingBalColumns() : avm.TranAcctBalQueryOptionDispl
 			//groupBy: false,
 			//aggregate: query.Aggregate.MAXIMUM,
 		},
-		{
-			fieldId: avm.TranQueryFields.TRANSACTIONLINES_EndingBalance,
-			groupBy: true,
-		},
+		// {
+		// 	fieldId: avm.TranQueryFields.TRANSACTIONLINES_EndingBalance,
+		// 	groupBy: true,
+		// },
 		{
 			alias: avm.TranQueryFields.FORMULA_Internal_Ending_Bal_Diff,
 			groupBy: false,
@@ -935,7 +954,75 @@ export function getTranAcct_EndingBalColumns() : avm.TranAcctBalQueryOptionDispl
 		},
 	];
 
-	return endBalColumns;
+	return columns;
+}
+
+export function getTranAcct_EndingBalColumns() : avm.TranAcctBalQueryOptionDisplayColumns[] {
+
+	const columns = [
+		{
+			fieldId: avm.TranQueryFields.ACCOUNT_Id,
+			groupBy: true,
+		},
+		{
+			fieldId: avm.TranQueryFields.TRANSACTIONLINES_Subsidiary,
+			groupBy: true,
+		},
+		{
+			fieldId: avm.TranQueryFields.ACCOUNT_AcctNumber,
+			groupBy: true,
+		},
+		{
+			fieldId: avm.TranQueryFields.ACCOUNT_AccountSearchDisplayNameCopy,
+			groupBy: true,
+		},
+		{
+			fieldId: avm.TranQueryFields.TRANSACTIONLINES_ExpenseAccount,
+			groupBy: true,
+		},
+		{
+			fieldId: avm.TranQueryFields.ACCOUNT_AcctType,
+			groupBy: true,
+		},
+		{
+			fieldId: avm.TranQueryFields.TRANSACTION_Id,
+			groupBy: true,
+			alias: avm.TranQueryFields.ENDBAL_TRANSACTION_Id,
+		},
+		{
+			fieldId: avm.TranQueryFields.TRANSACTION_Id,
+			groupBy: true,
+			context: query.FieldContext.DISPLAY,
+			alias: avm.TranQueryFields.ENDBAL_TRANSACTION_Id_Display,
+		},
+		// This Date Field is REQUIRED so I can filter
+		{
+			fieldId: avm.TranQueryFields.TRANSACTION_Date,
+			groupBy: true,
+			// If sorting by Date, do NOT set this Aggregate, or it will ERROR (and not tell you WHY!?)
+			//groupBy: false,
+			//aggregate: query.Aggregate.MAXIMUM,
+			//alias: avm.TranQueryFields.ENDBAL_TRANSACTION_Date,
+		},
+		// This Date Field is used so I can get the date later, it has a DIFFERENT ALIAS than the one above.
+		{
+			fieldId: avm.TranQueryFields.TRANSACTION_Date,
+			groupBy: true,
+			alias: avm.TranQueryFields.ENDBAL_TRANSACTION_Date,
+		},
+		{
+			fieldId: avm.TranQueryFields.TRANSACTIONLINES_EndingBalance,
+			groupBy: true,
+		},
+		// {
+		// 	alias: avm.TranQueryFields.FORMULA_Internal_Ending_Bal_Diff,
+		// 	groupBy: false,
+		// 	formula: `'[${avm.TranQueryFields.FORMULA_Internal_Ending_Bal_Diff}]'`,
+		// 	//type: query.ReturnType.CURRENCY,
+		// },
+	];
+
+	return columns;
 }
 
 export function getTranAcct_LastEndingBalResult(subId : number, accountId: number, parameters: any) : avm.ObjSql {
@@ -1012,7 +1099,7 @@ export function getTranAcct_LastTransaction(subId : number, accountId: number, p
 			{fieldId: avm.TranQueryFields.TRANSACTIONLINES_Subsidiary, operator: query.Operator.EQUAL, values: [subId]},
 			{fieldId: avm.TranQueryFields.ACCOUNT_Id, operator: query.Operator.EQUAL, values: [accountId]},
 		],
-		displayColumns: getTranAcct_EndingBalColumns(),
+		displayColumns: getTranAcct_LastTranColumns(),
 		sortOptions: {
 			// fieldId: avm.TranQueryFields.TRANSACTION_Id,
 			fieldId: avm.TranQueryFields.TRANSACTION_Date,
@@ -1061,30 +1148,39 @@ export function updateTranAcctBalResults(tranAcctList : avm.ObjSql, parameters: 
 	elog.debug("tranAcctList", tranAcctList, eOpt);
 	elog.debug("parameters", JSON.stringify(parameters), eOpt, ["force"]);
 
+	const includeFieldsEB = [
+		avm.TranQueryFields.ACCOUNT_Id,
+		avm.TranQueryFields.TRANSACTIONLINES_Subsidiary,
+		avm.TranQueryFields.TRANSACTIONLINES_EndingBalance,
+		avm.TranQueryFields.ENDBAL_TRANSACTION_Date,
+		avm.TranQueryFields.ENDBAL_TRANSACTION_Id,
+		avm.TranQueryFields.ENDBAL_TRANSACTION_Id_Display,
+	]
 	// Process Records
 	tranAcctList.records.forEach((rec, i) => {
 		const accountId = rec["account.id"] as number;
 		const subsidiary = rec["transactionlines.subsidiary"] as number;
 
-		elog.debug("InternalBal Record:BEFORE", rec, eOpt, []);
+		elog.debug("InternalBal Record:BEFORE", tranAcctList.records[i], eOpt, []);
+		// Get Ending Bal Record Fields - if one Exists
 		const endingBalList = getTranAcct_LastEndingBalResult(subsidiary, accountId, parameters);
 		elog.debug("recordCount", endingBalList.recordCount, eOpt, ["force"]);
 		if (endingBalList.recordCount == 1) {
 			// Found Ending Balance Record, combine with existing record
 			elog.debug("FOUND Ending Balance Record. Record:", endingBalList.records[0], eOpt);
-			tranAcctList.records[i] = { ...rec, ...endingBalList.records[0] };
+			const recToAdd = avm.modifyRecord(endingBalList.records[0], includeFieldsEB);
+			tranAcctList.records[i] = { ...tranAcctList.records[i], ...recToAdd};
 			tranAcctList.columns = avm.combineColumns(tranAcctList.columns, endingBalList.columns);
-		} else {
-			// No Ending Balance Record, get most recent Transaction Record
-			elog.debug("NO Ending Balance Record. recordCount:", endingBalList.recordCount, eOpt);
-			const lastTranList = getTranAcct_LastTransaction(subsidiary, accountId, parameters);
-			if (lastTranList.recordCount == 1) {
-				elog.debug("FOUND Last Transaction Record. Record:", lastTranList.records[0], eOpt);
-				tranAcctList.records[i] = { ...rec, ...lastTranList.records[0] };
-				tranAcctList.columns = avm.combineColumns(tranAcctList.columns, lastTranList.columns);
-			}
 		}
-		elog.debug("InternalBal Record:AFTER", rec, eOpt, []);
+
+		// Get the most recent Transaction Record
+		const lastTranList = getTranAcct_LastTransaction(subsidiary, accountId, parameters);
+		if (lastTranList.recordCount == 1) {
+			elog.debug("FOUND Last Transaction Record. Record:", lastTranList.records[0], eOpt);
+			tranAcctList.records[i] = { ...tranAcctList.records[i], ...lastTranList.records[0] };
+			tranAcctList.columns = avm.combineColumns(tranAcctList.columns, lastTranList.columns);
+		}
+		elog.debug("InternalBal Record:AFTER", tranAcctList.records[i], eOpt, []);
 	});
 
 }

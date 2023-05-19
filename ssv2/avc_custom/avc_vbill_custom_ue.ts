@@ -46,9 +46,12 @@ export function beforeLoad(context: EntryPoints.UserEvent.beforeLoadContext) {
 
     // Main Section
     // Only Display if:
-    //  Not in Edit Mode or View Mode
-    //  Account is a Liability Account
-    let bHideEndingBalanceCol = !([context.UserEventType.EDIT, context.UserEventType.VIEW].includes(context.type)) || getHideEndingBalCol(slExpense);
+    //    Not in Edit Mode or View Mode ||
+    //    Account is a Liability Account
+    //  AND
+    //    Not in Create Mode
+    let bHideEndingBalanceCol = (!([context.UserEventType.EDIT, context.UserEventType.VIEW].includes(context.type)) || getHideEndingBalCol(slExpense)) &&
+      (!([context.UserEventType.CREATE].includes(context.type)));
     if (bHideEndingBalanceCol) {
       log.debug(`${stLogTitle}`, 'HIDE:Ending Balance');
       slExpense.getField({id: NS_BILL_EXPENSE_SUBLIST_ENDINGBAL_ID}).updateDisplayType({displayType: serverWidget.FieldDisplayType.HIDDEN});

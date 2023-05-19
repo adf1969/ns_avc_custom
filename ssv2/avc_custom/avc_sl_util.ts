@@ -21,13 +21,30 @@ import {Component, FieldContext} from "N/query";
 import {combineTranAcctList} from "./avc_accountbalrpt_main_sl";
 
 
+// Global Variables
+export var gFilterFormId = 'custpage_avc_accountbalrpt';
+export var gSublistName = 'avc_acctbal_sublist';
+
+export var AcctBalSettings = {
+	FilterFormId : 'custpage_avc_accountbalrpt',
+	SublistName : 'avc_acctbal_sublist',
+	BgColor_NoEndingBal: '#f0e191', // Lt Yellow/Orange
+	BgColor_BalMismatch: '#ebd0d1'  // Lt Pink
+}
+
+export interface ObjSqlRecord {
+	[fieldId: string]: string | boolean | number | null;
+}
+
 // INTERFACES
 export interface ObjSql {
 	recordCount: number,
 	time: number,
-	records: Array<{ [fieldId: string]: string | boolean | number | null }>,
+	//records: Array<{ [fieldId: string]: string | boolean | number | null }>,
+	records: Array<ObjSqlRecord>,
 	resultSet?: query.ResultSet,
 	columns?: query.Column[] | Column[],
+	options?: TranAcctBalQueryOptions,
 }
 
 // DATABASE FUNCTIONS
@@ -152,6 +169,11 @@ export enum TranQueryFields {
 	TRANSACTIONLINES_NetAmount = 'transactionlines.netamount',
 	TRANSACTIONLINES_EndingBalance = 'transactionlines.custcol_avc_ending_bal',
 	FORMULA_Internal_Ending_Bal_Diff = 'formula_int_end_bal_diff',
+
+	// The Following are for use as ALIASES ONLY
+	ENDBAL_TRANSACTION_Date = 'eb_transaction.trandate',
+	ENDBAL_TRANSACTION_Id = 'eb_transaction.id',
+	ENDBAL_TRANSACTION_Id_Display = 'eb_transaction.id_display',
 }
 
 export interface CreateSortOptions {
@@ -568,7 +590,7 @@ export function getAcctBalQueryResultSet(options?: TranAcctBalQueryOptions): Obj
 		function: 'getAcctBalQueryResultSet',
 		tags: ['AcctBal', 'Account', 'Query'],
 	};
-	//elog.addFunctions([eOpt.function]); // Include the current Function. Comment out to NOT include it.
+	elog.addFunctions([eOpt.function]); // Include the current Function. Comment out to NOT include it.
 	elog.debug(`options`, options, eOpt);
 
 	try {
@@ -619,6 +641,7 @@ export function getAcctBalQueryResultSet(options?: TranAcctBalQueryOptions): Obj
 			records: records,
 			resultSet: limitedResultSet,
 			columns: columnsExt,
+			options: options,
 		}
 		elog.debug(`objSql`, objSQL, eOpt, ["detail"]);
 
@@ -651,9 +674,37 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 
 	//log.debug(`${stLogTitle}:asLinks`, asLinks);
 	elog.debug(`asLinks`, asLinks, eOpt);
-	//elog.debug('','DETAIL2', {...eOpt, tags:['detail2']});
+	elog.debug("sqlList.columns", sqlList.columns, eOpt, ["force"]);
 
+	let options = sqlList.options;
+	let trandateOnOrBefore = options.trandateOnOrBefore;
 
+	// Whatever ORDER these columsn are defined is the ORDER they will be OUTPUT.
+	// Any column NOT included, will have column.type set to HIDDEN and will NOT be displayed
+	sqlList.columns = updateColumns(sqlList.columns, [
+		{alias: TranQueryFields.TRANSACTIONLINES_Subsidiary_Display, properties: { label: 'Subsidiary'}},
+		{alias: TranQueryFields.TRANSACTIONLINES_ExpenseAccount_Display, properties: { label: 'Account (Register View)'}},
+		{alias: TranQueryFields.TRANSACTION_Id_Display, properties: { label: `Latest Bill (as of ${trandateOnOrBefore})`}},
+		{alias: TranQueryFields.TRANSACTION_Date, properties: {
+			label: `Latest Bill Date`,
+			type: ReturnType.DATE,
+		}},
+		{alias: TranQueryFields.TRANSACTIONLINES_NetAmount, properties: {
+			label: `Internal Balance (as of ${trandateOnOrBefore})`,
+			type: ReturnType.CURRENCY,
+		}},
+		{alias: TranQueryFields.ENDBAL_TRANSACTION_Date, properties: {
+			label: 'Ending Bal Date',
+			type: ReturnType.DATE,
+		}},
+		{alias: TranQueryFields.TRANSACTIONLINES_EndingBalance, properties: { label: 'Ending Balance'}},
+		{alias: TranQueryFields.FORMULA_Internal_Ending_Bal_Diff, properties: {
+			label: 'Ending - Internal Bal Difference',
+			type: ReturnType.CURRENCY,
+		}},
+	]);
+
+	/* OLD METHOD - No Longer Used - Using updateColumns as it is MUCH better
 	// Set the Columns that I want to display
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.ACCOUNT_Id, "type", "HIDDEN");
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_Subsidiary, "type", "HIDDEN");
@@ -668,19 +719,25 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 	]);
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.ACCOUNT_AcctType, "type", "HIDDEN");
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_NetAmount, [
-		{property: "label", value: "Internal Balance"},
+		{property: "label", value: `Internal Balance (as of ${trandateOnOrBefore})`},
 		{property: "type", value: ReturnType.CURRENCY},
 	]);
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTION_Id, "type", "HIDDEN");
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTION_Id_Display, [
-		{property: "label", value: "End. Bal / Latest Bill"},
+		{property: "label", value: "Latest Bill"},
 	]);
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.ENDBAL_TRANSACTION_Date, [
+		{property: "label", value: "Ending Bal Date"}
+	]);
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.ENDBAL_TRANSACTION_Id, "type", "HIDDEN");
+	setColumnValueByAlias(sqlList.columns, TranQueryFields.ENDBAL_TRANSACTION_Id_Display, "type", "HIDDEN");
+
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTIONLINES_EndingBalance, [
 		{property: "label", value: "Ending Balance"},
 		{property: "type", value: ReturnType.CURRENCY},
 	]);
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.TRANSACTION_Date, [
-		{property: "label", value: "End. Bal / Latest Bill Date"},
+		{property: "label", value: "Latest Bill Date"},
 		{property: "type", value: ReturnType.DATE},
 	]);
 	setColumnValueByAlias(sqlList.columns, TranQueryFields.FORMULA_Internal_Ending_Bal_Diff, [
@@ -688,14 +745,21 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 		{property: "type", value: ReturnType.CURRENCY},
 	]);
 
-	// Move Internal Balance to right BEFORE Ending Balance
+
+	// Move Columns around
 	const colAliasesBefore = sqlList.columns.map((column) => column.alias);
 	//log.debug(`${stLogTitle}:colAliasesBefore`, colAliasesBefore);
 	elog.debug(`colAliasesBefore`, colAliasesBefore, eOpt);
+	// Move Latest Bill after Account
+	moveColumn(sqlList.columns, TranQueryFields.TRANSACTION_Id_Display, TranQueryFields.ACCOUNT_AccountSearchDisplayNameCopy, "after");
+	// Move Internal Balance to right BEFORE Ending Balance
 	moveColumn(sqlList.columns, TranQueryFields.TRANSACTIONLINES_NetAmount, TranQueryFields.TRANSACTIONLINES_EndingBalance, "before");
+	// Move Ending Bal Date after Ending Balance
+	moveColumn(sqlList.columns, TranQueryFields.ENDBAL_TRANSACTION_Date, TranQueryFields.TRANSACTIONLINES_EndingBalance, "after");
 	const colAliasesAfter = sqlList.columns.map((column) => column.alias);
 	//log.debug(`${stLogTitle}:colAliasesAfter`, colAliasesAfter);
 	elog.debug(`colAliasesAfter`, colAliasesAfter, eOpt);
+	*/
 
 	// Loop thru Records
 	let recs = sqlList.records;
@@ -730,6 +794,7 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 
 		// Loop thru Columns - Set Display
 		cols.forEach((col, cIndex) => {
+			let bProcessed : boolean = false;
 			let cAlias = col.alias;
 
 			// Get the Value from the rec object
@@ -754,6 +819,7 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 						let sSubId = Number(rec[TranQueryFields.TRANSACTIONLINES_Subsidiary]);
 						let sSubsidiaryUrl = getSubsidiaryUrl(cValue.toString(), sSubId)
 						rec[cAlias] = sSubsidiaryUrl;
+						bProcessed = true;
 					}
 					break;
 
@@ -762,6 +828,7 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 						let sAccountId = Number(rec[TranQueryFields.TRANSACTIONLINES_ExpenseAccount]);
 						let sAccountRegUrl = getAccountRegisterUrl(cValue.toString(), sAccountId)
 						rec[cAlias] = sAccountRegUrl;
+						bProcessed = true;
 					}
 					break;
 
@@ -770,6 +837,18 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 						let sTranId = Number(rec[TranQueryFields.TRANSACTION_Id]);
 						let sTranUrl = getBillUrl(cValue.toString(), sTranId)
 						rec[cAlias] = sTranUrl;
+						bProcessed = true;
+					}
+					break;
+
+				case TranQueryFields.TRANSACTIONLINES_EndingBalance:
+					if ((asLinks) && cValue) {
+						let currency = <number>cValue;
+						const displayCurrency = formatToCurrency(currency, false);
+						let sTranId = Number(rec[TranQueryFields.ENDBAL_TRANSACTION_Id]);
+						let sTranUrl = getBillUrl(displayCurrency, sTranId)
+						rec[cAlias] = sTranUrl;
+						bProcessed = true;
 					}
 					break;
 			}
@@ -789,28 +868,32 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 					}
 					break;
 			}
-			// Fix Values based upon Column type
-			let cType = col.type;
-			//log.debug(`${stLogTitle}:switch(cType)`, cType);
-			elog.debug(`switch(cType)`, cType, eOpt);
-			switch (cType) {
-				case 'PERCENT':
-					let percent = <number>cValue;
-					const displayPercent = `${(percent * 100).toFixed(2)}%`;
-					//rSet.results[indexR].values[indexV] = displayPercent;
-					rec[cAlias] = displayPercent;
-					break;
-				case 'CURRENCY':
-					let currency = <number>cValue;
-					//const displayCurrency = currency.toLocaleString("en-US", { style: "currency", currency: "USD"});
-					//log.audit(`${stLogTitle}:Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}`);
-					elog.debug(`Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}`, eOpt);
-					const displayCurrency = formatToCurrency(currency, false);
-					//rSet.results[indexR].values[indexV] = displayCurrency;
-					rec[cAlias] = displayCurrency;
-					//log.audit(`${stLogTitle}:Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}, after:${displayCurrency}`);
-					elog.debug(`Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}, after:${displayCurrency}`, eOpt);
-					break;
+
+			// If we haven't completed processing this rec/col (cell) then continue
+			if (!bProcessed) {
+				// Fix Values based upon Column type
+				let cType = col.type;
+				//log.debug(`${stLogTitle}:switch(cType)`, cType);
+				elog.debug(`switch(cType)`, cType, eOpt);
+				switch (cType) {
+					case 'PERCENT':
+						let percent = <number>cValue;
+						const displayPercent = `${(percent * 100).toFixed(2)}%`;
+						//rSet.results[indexR].values[indexV] = displayPercent;
+						rec[cAlias] = displayPercent;
+						break;
+					case 'CURRENCY':
+						let currency = <number>cValue;
+						//const displayCurrency = currency.toLocaleString("en-US", { style: "currency", currency: "USD"});
+						//log.audit(`${stLogTitle}:Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}`);
+						elog.debug(`Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}`, eOpt);
+						const displayCurrency = formatToCurrency(currency, false);
+						//rSet.results[indexR].values[indexV] = displayCurrency;
+						rec[cAlias] = displayCurrency;
+						//log.audit(`${stLogTitle}:Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}, after:${displayCurrency}`);
+						elog.debug(`Format Currency (r:${rIndex} | v:${cIndex})`, `before: ${currency}, after:${displayCurrency}`, eOpt);
+						break;
+				}
 			}
 
 		}); // Loop thru cols.forEach() | for Display
@@ -821,18 +904,186 @@ export function processTranList(sqlList : ObjSql, asLinks : boolean = false): Ob
 
 } // processTranList
 
+/**
+ * Modifies a given record by including and excluding specified fields.
+ *
+ * @function modifyRecord
+ * @param {ObjSqlRecord} rec - The record to be modified.
+ * @param {string[]} [includeFields=[]] - An array of field names to be included in the record.
+ *     If this array is empty, all fields are included.
+ * @param {string[]} [excludeFields=[]] - An array of field names to be excluded from the record.
+ *     If a field name exists in this array, it is removed from the resultant record.
+ * @returns {ObjSqlRecord} - The modified record.
+ *
+ * @example
+ * const record = {
+ *   "name": "John Doe",
+ *   "age": 30,
+ *   "email": "john.doe@example.com",
+ *   "isAdmin": false
+ * };
+ *
+ * const includeFields = ['name', 'age'];
+ * const excludeFields = ['isAdmin'];
+ *
+ * const modifiedRecord = modifyRecord(record, includeFields, excludeFields);
+ * // modifiedRecord now contains only the 'name' and 'age' fields.
+ */
+export function modifyRecord(rec: ObjSqlRecord, includeFields: string[] = [], excludeFields: string[] = []): ObjSqlRecord {
+	let eOpt : EnhLogOptions = {
+		function: 'modifyRecord',
+		tags: ['detail']
+	};
+	elog.addFunctions([eOpt.function]); // Include the current Function. Comment out to NOT include it.
+	elog.debug("rec:BEFORE", rec, eOpt);
+	elog.debug("includeFields", includeFields, eOpt);
+	elog.debug("excludeFields", excludeFields, eOpt);
+
+	const result: ObjSqlRecord = {};
+
+	// If includeFields is empty, include all fields, otherwise, include only those in includeFields
+	const fieldsToInclude = includeFields.length > 0 ? includeFields : Object.keys(rec);
+
+	for (const field of fieldsToInclude) {
+		// Exclude fields that are in excludeFields
+		if (excludeFields.includes(field)) {
+			continue;
+		}
+
+		// If the field exists in jsonObject, add it to the result
+		if (rec.hasOwnProperty(field)) {
+			result[field] = rec[field];
+		}
+	}
+
+	elog.debug("rec:AFTER", result, eOpt);
+	return result;
+}
+
+
+interface ColumnProperties {
+	alias: string;
+	properties: { [property: string]: any };
+}
+
+
+/**
+ * Updates an array of Column objects based on the provided ColumnProperties.
+ *
+ * This function takes an array of Column objects and an array of ColumnProperties objects,
+ * and returns a new array of Column objects that matches the order of the ColumnProperties array.
+ * Each Column object in the returned array is updated with properties defined in the corresponding
+ * ColumnProperties object. If a Column does not have a corresponding ColumnProperties object,
+ * its 'type' property is set to "HIDDEN".
+ *
+ * @param {Column[]} columns - The initial array of Column objects to be updated.
+ * @param {ColumnProperties[]} newColProps - The array of ColumnProperties objects that contains
+ *                                           the new properties and order for the Column objects.
+ *
+ * @returns {Column[]} - The updated array of Column objects.
+ *
+ * @example
+ *
+ * const columns = [
+ *   { alias: 'alias1', type: 'type1' },
+ *   { alias: 'alias2', type: 'type2' },
+ *   { alias: 'alias3', type: 'type3' },
+ * ];
+ *
+ * const newColProps = [
+ *   { alias: 'alias2', properties: { type: 'newType2' } },
+ *   { alias: 'alias1', properties: { type: 'newType1' } },
+ * ];
+ *
+ * const updatedColumns = updateColumns(columns, newColProps);
+ *
+ * // updatedColumns is now:
+ * // [
+ * //   { alias: 'alias2', type: 'newType2' },
+ * //   { alias: 'alias1', type: 'newType1' },
+ * //   { alias: 'alias3', type: 'HIDDEN' },
+ * // ]
+ */
+export function updateColumns(columns: Column[], newColProps: ColumnProperties[]): Column[] {
+	let aliasMap: {[key: string]: Column} = {};
+	for (let column of columns) {
+		aliasMap[column.alias] = column;
+	}
+
+	let orderedColumns: Column[] = [];
+	for (let aliasObj of newColProps) {
+		if (aliasMap[aliasObj.alias]) {
+			let updatedColumn = {
+				...aliasMap[aliasObj.alias],
+				...aliasObj.properties
+			};
+			orderedColumns.push(updatedColumn);
+			delete aliasMap[aliasObj.alias];
+		}
+	}
+
+	for (let remainingAlias in aliasMap) {
+		let hiddenColumn = {
+			...aliasMap[remainingAlias],
+			type: "HIDDEN"
+		};
+		orderedColumns.push(hiddenColumn);
+	}
+
+	return orderedColumns;
+}
+
+
+
+export function updateColumns1(columns: Column[], aliases: string[]): Column[] {
+	// First, create a copy of the original array to avoid mutating it
+	let updatedColumns = [...columns];
+
+	// Create a map of aliases for quick access
+	let aliasMap: {[key: string]: Column} = {};
+	for (let column of updatedColumns) {
+		aliasMap[column.alias] = column;
+	}
+
+	// Create a new array based on the order of aliases
+	let orderedColumns: Column[] = [];
+	for (let alias of aliases) {
+		if (aliasMap[alias]) {
+			orderedColumns.push(aliasMap[alias]);
+			// Remove the used column from the map
+			delete aliasMap[alias];
+		}
+	}
+
+	// For any remaining columns not included in the alias list, set type to "HIDDEN"
+	for (let remainingAlias in aliasMap) {
+		aliasMap[remainingAlias].type = "HIDDEN";
+		orderedColumns.push(aliasMap[remainingAlias]);
+	}
+
+	return orderedColumns;
+};
+
 
 /*
  * Combine 2 arrays of Columns into 1 array of Columns where there are no duplicates, based upon the alias field
 */
-export function combineColumns(columns1: query.Column[] | Column[], columns2: query.Column[] | Column[]): Column[] {
+export function combineColumns(
+	columns1: query.Column[] | Column[],
+	columns2: query.Column[] | Column[],
+	includeAliases: string[] = [],
+	excludeAliases: string[] = []
+): Column[] {
 	let eOpt : EnhLogOptions = {
 		function: 'combineColumns',
 		tags: ['detail']
 	};
 	//elog.addFunctions([eOpt.function]); // Include the current Function. Comment out to NOT include it.
+
 	elog.debug("columns1", columns1, eOpt);
 	elog.debug("columns2", columns2, eOpt);
+	elog.debug("includeAliases", includeAliases, eOpt);
+	elog.debug("excludeAliases", excludeAliases, eOpt);
 
 	// Create a new array that contains all the columns in columns1
 	const combinedColumns: Column[] = [...columns1];
@@ -840,6 +1091,11 @@ export function combineColumns(columns1: query.Column[] | Column[], columns2: qu
 	// Search for any column in column2, if it doesn't exist, add it to the combinedColumns array.
 	for (const column2 of columns2) {
 		const existingColumn = combinedColumns.find((column1) => column1.alias === column2.alias);
+
+		// Skip column2 if it's in the excludeAliases list or if includeAliases is not empty and column2.alias is not in it
+		if (excludeAliases.includes(column2.alias) || (includeAliases.length > 0 && !includeAliases.includes(column2.alias))) {
+			continue;
+		}
 
 		if (!existingColumn) {
 			combinedColumns.push(column2);
@@ -857,6 +1113,7 @@ export function combineColumns(columns1: query.Column[] | Column[], columns2: qu
 	elog.debug("combinedColumns", combinedColumns, eOpt);
 	return combinedColumns;
 }
+
 
 export function moveColumn1(columns: query.Column[] | Column[], columnToMoveAlias: string, locationAlias: string, position: 'before' | 'after'): void {
 	const columnToMove = columns.find((c) => c.alias === columnToMoveAlias);
@@ -2063,6 +2320,7 @@ class ELog {
 		this.excludeTags = this.globalTags.filter(tag => tag.startsWith('!')).map(tag => tag.slice(1));
 	}
 
+	//TODO Finish making this work for console.log, since console.log accepts only ONE argument, not 2, I have to fix things.
 	private genericLog(logFunc: LogFunction, arg1: any, arg2?: any, arg3?: EnhLogOptions, arg4?: string | string[]): void {
 		let options: EnhLogOptions;
 		let maxLogLength = 3999;
@@ -2072,7 +2330,7 @@ class ELog {
 		if (typeof arg1 === 'string') {
 			options = {...arg3} || { function: '', tags: [], details: '' };
 			options.title = options.function ? `${options.function}:${arg1}` : arg1;
-			options.details = typeof arg2 === 'object' ? JSON.stringify(arg2) : arg2.toString();
+			options.details = (typeof arg2 === 'object' && arg2 !== null) ? JSON.stringify(arg2) : (arg2 ?? "");
 		} else {
 			options = {...arg1};
 			options.details = typeof options.details === 'object' ? JSON.stringify(options.details) : options.details.toString();
@@ -2185,6 +2443,10 @@ class ELog {
 
 	public emergency: EnhLogFunction = (arg1: any, arg2?: any, arg3?: EnhLogOptions, arg4?: string | string[]) => {
 		this.genericLog(log.emergency, arg1, arg2, arg3, arg4);
+	}
+
+	public console: EnhLogFunction = (arg1: any, arg2?: any, arg3?: EnhLogOptions, arg4?: string | string[]) => {
+		this.genericLog(console.log, arg1, arg2, arg3, arg4);
 	}
 }
 

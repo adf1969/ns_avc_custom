@@ -8,6 +8,8 @@
     "@types/intl": "^1.2.0"
   },
   "dependencies": {
+    "@types/jquery": "~3.5.0",
+    "jquery": "~3.5.1",
     "ts-migrate": "^0.1.26"
   }
 }
